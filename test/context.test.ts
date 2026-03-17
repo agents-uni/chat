@@ -141,6 +141,35 @@ describe('ContextManager', () => {
       const result = cm.parseMentions('@alice @Alice @alice', participants);
       expect(result).toEqual(['alice']);
     });
+
+    it('should parse multi-word agent names with spaces', () => {
+      const multiWordParticipants: ParticipantInfo[] = [
+        { id: 'ai-data-remediation-engineer', name: 'AI Data Remediation Engineer', role: 'Engineer' },
+        { id: 'ai-engineer', name: 'AI Engineer', role: 'Engineer' },
+      ];
+
+      const result = cm.parseMentions('@AI Data Remediation Engineer hello', multiWordParticipants);
+      expect(result).toEqual(['ai-data-remediation-engineer']);
+    });
+
+    it('should prefer longer name match over shorter prefix', () => {
+      const multiWordParticipants: ParticipantInfo[] = [
+        { id: 'ai-engineer', name: 'AI Engineer', role: 'Engineer' },
+        { id: 'ai-data-remediation-engineer', name: 'AI Data Remediation Engineer', role: 'Engineer' },
+      ];
+
+      const result = cm.parseMentions('@AI Data Remediation Engineer hello', multiWordParticipants);
+      expect(result).toEqual(['ai-data-remediation-engineer']);
+    });
+
+    it('should match by hyphenated agent ID', () => {
+      const multiWordParticipants: ParticipantInfo[] = [
+        { id: 'ai-data-remediation-engineer', name: 'AI Data Remediation Engineer', role: 'Engineer' },
+      ];
+
+      const result = cm.parseMentions('@ai-data-remediation-engineer hello', multiWordParticipants);
+      expect(result).toEqual(['ai-data-remediation-engineer']);
+    });
   });
 
   describe('buildTaskContent', () => {

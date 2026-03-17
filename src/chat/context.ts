@@ -147,29 +147,51 @@ export class ContextManager {
    * Returns list of matched agent IDs.
    */
   parseMentions(content: string, participants: ParticipantInfo[]): string[] {
-    const mentionPattern = /@(\S+)/g;
+    const contentLower = content.toLowerCase();
     const mentions: string[] = [];
     const seen = new Set<string>();
-    let match: RegExpExecArray | null;
 
-    while ((match = mentionPattern.exec(content)) !== null) {
-      const token = match[1].toLowerCase();
+    // Check for @all first
+    const allMatch = content.match(/@(all|所有人|全体)(?:\s|$)/i);
+    if (allMatch) {
+      return participants.map(p => p.id);
+    }
 
-      // Check for @all
-      if (token === 'all' || token === '所有人' || token === '全体') {
-        return participants.map(p => p.id);
+    // Build candidate names sorted by length descending (greedy match longer names first)
+    // Each candidate maps to its agent ID
+    const candidates: Array<{ pattern: string; id: string }> = [];
+    for (const p of participants) {
+      candidates.push({ pattern: p.name.toLowerCase(), id: p.id });
+      candidates.push({ pattern: p.id.toLowerCase(), id: p.id });
+    }
+    candidates.sort((a, b) => b.pattern.length - a.pattern.length);
+
+    // Find all @ positions and try to match multi-word names
+    let idx = 0;
+    while (idx < contentLower.length) {
+      const atPos = contentLower.indexOf('@', idx);
+      if (atPos === -1) break;
+
+      const afterAt = contentLower.slice(atPos + 1);
+      let matched = false;
+
+      for (const { pattern, id } of candidates) {
+        if (seen.has(id)) continue;
+        if (afterAt.startsWith(pattern)) {
+          // Ensure the match ends at a word boundary (end of string, space, punctuation)
+          const charAfter = afterAt[pattern.length];
+          if (charAfter === undefined || /[\s,;.!?]/.test(charAfter)) {
+            mentions.push(id);
+            seen.add(id);
+            idx = atPos + 1 + pattern.length;
+            matched = true;
+            break;
+          }
+        }
       }
 
-      // Match against agent IDs and names
-      for (const p of participants) {
-        if (seen.has(p.id)) continue;
-        if (
-          p.id.toLowerCase() === token ||
-          p.name.toLowerCase() === token
-        ) {
-          mentions.push(p.id);
-          seen.add(p.id);
-        }
+      if (!matched) {
+        idx = atPos + 1;
       }
     }
 
