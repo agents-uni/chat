@@ -11,6 +11,7 @@
  */
 
 import type { ChatMessage, ParticipantInfo, RelationshipChange } from '../types.js';
+import type { Logger } from '../utils/logger.js';
 
 // ─── Sentiment Patterns ─────────────────────────
 
@@ -47,6 +48,12 @@ interface InferredEvent {
 // ─── Tracker ────────────────────────────────────
 
 export class RelationshipTracker {
+  private readonly logger?: Logger;
+
+  constructor(logger?: Logger) {
+    this.logger = logger;
+  }
+
   /**
    * Analyze a round of agent responses and infer relationship events.
    *
@@ -78,6 +85,7 @@ export class RelationshipTracker {
         const sentiment = this.detectSentiment(content, participant);
 
         if (sentiment === 'positive') {
+          this.logger?.debug('Tracker', 'sentiment', `from="${authorId}" → to="${participant.id}", type="chat.agreement"`, authorId);
           events.push({
             from: authorId,
             to: participant.id,
@@ -86,6 +94,7 @@ export class RelationshipTracker {
             description: `${response.agentName} agreed with ${participant.name} in group chat`,
           });
         } else if (sentiment === 'negative') {
+          this.logger?.debug('Tracker', 'sentiment', `from="${authorId}" → to="${participant.id}", type="chat.disagreement"`, authorId);
           events.push({
             from: authorId,
             to: participant.id,
@@ -94,6 +103,7 @@ export class RelationshipTracker {
             description: `${response.agentName} disagreed with ${participant.name} in group chat`,
           });
         } else if (sentiment === 'collaborative') {
+          this.logger?.debug('Tracker', 'sentiment', `from="${authorId}" → to="${participant.id}", type="chat.collaboration"`, authorId);
           events.push({
             from: authorId,
             to: participant.id,
@@ -109,6 +119,7 @@ export class RelationshipTracker {
     if (responses.length >= 2) {
       const consensus = this.detectConsensus(responses, participants);
       if (consensus) {
+        this.logger?.debug('Tracker', 'consensus', `detected among ${responses.length} agents`);
         // Pairwise events for consensus
         for (let i = 0; i < responses.length; i++) {
           for (let j = i + 1; j < responses.length; j++) {

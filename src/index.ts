@@ -27,6 +27,8 @@ program
   .option('--openclaw-dir <path>', 'OpenClaw workspace directory')
   .option('--context-window <number>', 'Max messages in context window', '20')
   .option('--timeout <number>', 'Agent response timeout in seconds', '120')
+  .option('--debug', 'Enable debug logging')
+  .option('--max-respondents <number>', 'Max agents to respond when no @mention', '3')
   .action(async (opts) => {
     // Resolve spec path
     let specPath = opts.spec;
@@ -65,6 +67,8 @@ program
       openclawDir: opts.openclawDir,
       contextWindowSize: parseInt(opts.contextWindow, 10),
       responseTimeoutMs: parseInt(opts.timeout, 10) * 1000,
+      debug: opts.debug ?? false,
+      maxRespondents: parseInt(opts.maxRespondents, 10),
     });
   });
 
@@ -76,6 +80,8 @@ export { ContextManager } from './chat/context.js';
 export { ChatDispatcher } from './chat/dispatcher.js';
 export { RelationshipTracker } from './relationship/tracker.js';
 export { startServer } from './server/index.js';
+export { createLogger } from './utils/logger.js';
+export type { Logger, LogCallback } from './utils/logger.js';
 export type {
   ChatMessage,
   ChatSession,
@@ -84,4 +90,5 @@ export type {
   ChatEngineOptions,
   ServerConfig,
   RelationshipChange,
+  DebugLogEntry,
 } from './types.js';

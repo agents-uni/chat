@@ -17,9 +17,29 @@
 - **顺序执行** — 一次一条消息，等待所有 agent 回复后再发下一条
 - **关系进化** — 从对话中自动推断关系事件（赞同/分歧/协作/共识）
 - **SSE 实时推送** — agent 回复即刻推送到浏览器
+- **Debug 模式** — `--debug` 开启完整调度日志，终端 + SSE 同步输出
 - **OpenClaw 兼容** — 底层使用 TASK.md/SUBMISSION.md 文件协议
 
 ## 快速开始
+
+### 前置条件
+
+1. **安装并配置 OpenClaw** — agent 的实际运行依赖 OpenClaw 运行时
+2. **部署 Universe** — 通过 `bridge import` 导入 agent 并执行 `deploy`，确保 `~/.openclaw/workspace-{agentId}/SOUL.md` 已生成
+3. **启动 OpenClaw Gateway** — 运行 `openclaw` 启动 gateway，chat 服务会通过 `openclaw agent` CLI 触发 agent 执行
+
+```bash
+# 1. 导入 agent（如果还没导入）
+agents-uni bridge import ./agency-agents
+
+# 2. 部署到 OpenClaw
+agents-uni deploy
+
+# 3. 启动 OpenClaw gateway（保持运行）
+openclaw
+```
+
+> **重要**: 如果 OpenClaw gateway 没有运行，chat 服务仍能启动，但所有 agent 都会超时无响应。
 
 ### 安装
 
@@ -50,6 +70,7 @@ Options:
   --openclaw-dir <path>       OpenClaw workspace 目录
   --context-window <number>   上下文窗口大小（默认 20 条消息）
   --timeout <number>          Agent 回复超时秒数（默认 120）
+  --debug                     开启 debug 日志（默认关闭）
 ```
 
 ## 架构
@@ -75,8 +96,8 @@ Options:
 ┌────────────────────┴────────────────────────────┐
 │            OpenClaw File Protocol                 │
 │                                                   │
-│  TASK.md ──→ Agent Workspace ──→ SUBMISSION.md   │
-│                                                   │
+│  TASK.md ──→ openclaw agent ──→ SUBMISSION.md    │
+│              (CLI 触发)                            │
 │  @agents-uni/core    @agents-uni/rel              │
 │  (Universe 解析)     (关系进化引擎)                │
 └──────────────────────────────────────────────────┘
@@ -90,8 +111,9 @@ Options:
 2. ChatEngine 将状态设为 `processing`（前端输入框禁用）
 3. ContextManager 为每个 agent 构建个性化 TASK.md（包含身份、关系、聊天历史）
 4. ChatDispatcher 将 TASK.md 写入各 agent 的 OpenClaw workspace
-5. 轮询 SUBMISSION.md，收集 agent 回复
-6. RelationshipTracker 从回复中推断关系事件
+5. 通过 `openclaw agent --agent {id}` 触发每个 agent 处理任务
+6. 轮询 SUBMISSION.md，收集 agent 回复
+7. RelationshipTracker 从回复中推断关系事件
 7. 事件喂入 EvolutionEngine 进行关系进化
 8. 状态回到 `idle`，用户可发送下一条消息
 
@@ -154,6 +176,45 @@ const responses = await engine.processMessage('大家对这个方案怎么看？
 - `@agents-uni/rel` — 多维关系引擎、EvolutionEngine
 - `hono` — HTTP 服务器
 - `commander` — CLI
+
+## Debug 模式
+
+启动时加上 `--debug` 即可开启详细调度日志：
+
+```bash
+npx agents-chat serve --debug --spec universe.yaml
+```
+
+终端会输出带颜色的调度全流程日志：
+
+```
+[DEBUG][Engine] processMessage: content="@Alice what do you think?"
+[DEBUG][Engine] parseMentions: found=["alice"]
+[DEBUG][Engine] routing: targeted=true, agents=["alice"]
+[DEBUG][Dispatcher] writeTask: contentLength=1234 (alice)
+[DEBUG][Dispatcher] clearSubmission: (alice)
+[DEBUG][Dispatcher] poll: waiting=["alice"], elapsed=0ms
+[DEBUG][Dispatcher] poll: waiting=["alice"], elapsed=2000ms
+[DEBUG][Dispatcher] responseReceived: length=256 (alice)
+[DEBUG][Tracker] sentiment: from="alice" → to="dana", type="chat.agreement"
+[DEBUG][Engine] relationshipChanges: count=1
+```
+
+同时，debug 日志也会通过 SSE 推送到前端（事件类型 `debug_log`），便于在浏览器控制台中调试。
+
+编程接口中也可以开启：
+
+```typescript
+const engine = new ChatEngine({
+  specPath: './universe.yaml',
+  debug: true,
+});
+
+// 监听 debug 日志
+engine.getLogger().onLog((entry) => {
+  console.log(entry.source, entry.action, entry.detail);
+});
+```
 
 ## 设计理念
 

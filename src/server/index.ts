@@ -26,6 +26,8 @@ export async function startServer(config: ServerConfig): Promise<void> {
     openclawDir: config.openclawDir,
     contextWindowSize: config.contextWindowSize ?? 20,
     responseTimeoutMs: config.responseTimeoutMs ?? 120_000,
+    debug: config.debug,
+    maxRespondents: config.maxRespondents,
   });
 
   // Create Hono app
@@ -90,6 +92,9 @@ export async function startServer(config: ServerConfig): Promise<void> {
   console.log(`  Universe: \x1b[33m${universeConfig.name}\x1b[0m`);
   console.log(`  Agents:   ${universeConfig.agents.map(a => a.name).join(', ')}`);
   console.log(`  Port:     \x1b[32m${config.port}\x1b[0m`);
+  if (config.debug) {
+    console.log(`  Debug:    \x1b[35menabled\x1b[0m`);
+  }
   console.log('');
   console.log(`  \x1b[2mOpen http://localhost:${config.port} in your browser\x1b[0m`);
   console.log('');

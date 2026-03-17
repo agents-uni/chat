@@ -1,16 +1,11 @@
 /**
  * Chat Engine — the central orchestrator for group chat.
  *
- * Coordinates:
- * 1. Universe loading (agents, relationships)
- * 2. Chat session lifecycle (create, message, history)
- * 3. Context building per agent
- * 4. Dispatch to OpenClaw workspaces
- * 5. Response collection
- * 6. Relationship event inference + evolution
- *
- * Sequential model: one message at a time. User must wait for all agents
- * to respond before sending the next message.
+ * Orchestration model (inspired by edict's conductor pattern):
+ * - @mention: dispatch ONLY to mentioned agent(s), serially
+ * - No @mention: pick up to `maxRespondents` relevant agents, serially
+ * - Each agent responds one at a time; later agents see earlier responses
+ * - Responses are broadcast in real-time as they arrive
  */
 
 import {
@@ -26,6 +21,7 @@ import {
 import { ContextManager } from './context.js';
 import { ChatDispatcher } from './dispatcher.js';
 import { RelationshipTracker } from '../relationship/tracker.js';
+import { createLogger, type Logger } from '../utils/logger.js';
 import type {
   ChatMessage,
   ChatSession,
@@ -53,13 +49,22 @@ export class ChatEngine {
   private readonly chatDispatcher: ChatDispatcher;
   private readonly relationshipTracker: RelationshipTracker;
   private readonly relBundle: RelEngineBundle;
+  private readonly logger: Logger;
+  private readonly maxRespondents: number;
 
   private session: ChatSession;
   private callbacks: ChatEngineCallbacks = {};
 
   constructor(options: ChatEngineOptions) {
+    // Initialize logger
+    this.logger = createLogger(options.debug ?? false);
+
     // Parse universe config
     this.config = parseSpecFile(options.specPath);
+    this.logger.debug('Engine', 'init', `universe="${this.config.name}", agents=${this.config.agents.length}`);
+
+    // Max agents to respond when no @mention (default 3)
+    this.maxRespondents = options.maxRespondents ?? 3;
 
     // Initialize workspace IO
     this.io = new FileWorkspaceIO({
@@ -71,17 +76,17 @@ export class ChatEngine {
       windowSize: options.contextWindowSize ?? 20,
     });
 
-    // Initialize chat dispatcher
+    // Initialize chat dispatcher (serial execution)
     this.chatDispatcher = new ChatDispatcher(this.io, this.contextManager, {
       responseTimeoutMs: options.responseTimeoutMs ?? 120_000,
       pollIntervalMs: options.pollIntervalMs ?? 2000,
-    });
+    }, this.logger);
 
     // Initialize relationship engine
     this.relBundle = createRelEngine(this.config);
 
     // Initialize relationship tracker
-    this.relationshipTracker = new RelationshipTracker();
+    this.relationshipTracker = new RelationshipTracker(this.logger);
 
     // Initialize session
     this.session = this.createSession();
@@ -106,6 +111,13 @@ export class ChatEngine {
    */
   getConfig(): UniverseConfig {
     return this.config;
+  }
+
+  /**
+   * Get the logger instance (for registering onLog callbacks).
+   */
+  getLogger(): Logger {
+    return this.logger;
   }
 
   /**
@@ -139,14 +151,12 @@ export class ChatEngine {
   /**
    * Process a user message through the group chat.
    *
-   * Sequential model:
-   * 1. Reject if already processing
-   * 2. Set status to 'processing'
-   * 3. Add user message to history
-   * 4. Dispatch to all agents
-   * 5. Collect responses
-   * 6. Infer relationship events
-   * 7. Set status back to 'idle'
+   * Routing:
+   * - @mention → dispatch ONLY to mentioned agent(s)
+   * - No @mention → pick up to maxRespondents relevant agents
+   *
+   * Execution: serial, one agent at a time. Each response is broadcast
+   * immediately and visible to subsequent agents.
    */
   async processMessage(content: string): Promise<ChatMessage[]> {
     if (this.session.status === 'processing') {
@@ -161,6 +171,8 @@ export class ChatEngine {
       const allParticipants = this.session.participants;
       const mentions = this.contextManager.parseMentions(content, allParticipants);
       const isTargeted = mentions.length > 0;
+      this.logger.debug('Engine', 'processMessage', `content="${content.slice(0, 80)}"`);
+      this.logger.debug('Engine', 'parseMentions', `found=${JSON.stringify(mentions)}`);
 
       // Create user message
       const userMessage: ChatMessage = {
@@ -175,12 +187,18 @@ export class ChatEngine {
       this.session.messages.push(userMessage);
       this.callbacks.onMessage?.(userMessage);
 
-      // Route: @mention → only those agents; no @ → all agents
+      // Route: @mention → only those agents; no @mention → pick relevant subset
       const targetParticipants = isTargeted
         ? allParticipants.filter(p => mentions.includes(p.id))
-        : allParticipants;
+        : this.selectRespondents(content, allParticipants);
 
-      // Build per-agent context and dispatch
+      this.logger.debug(
+        'Engine',
+        'routing',
+        `targeted=${isTargeted}, agents=${JSON.stringify(targetParticipants.map(p => p.id))}`
+      );
+
+      // Serial dispatch with per-response callback
       const responses = await this.chatDispatcher.dispatchAndCollect(
         content,
         targetParticipants,
@@ -188,14 +206,13 @@ export class ChatEngine {
         (agentId: string) => this.buildAgentContext(agentId, content, {
           isMentioned: mentions.includes(agentId),
           isTargeted,
-        })
+        }),
+        // Called after each agent responds — adds to history so next agent sees it
+        (response: ChatMessage) => {
+          this.session.messages.push(response);
+          this.callbacks.onMessage?.(response);
+        }
       );
-
-      // Add responses to history and broadcast
-      for (const response of responses) {
-        this.session.messages.push(response);
-        this.callbacks.onMessage?.(response);
-      }
 
       // Infer relationship events
       const inferredEvents = this.relationshipTracker.inferEvents(responses, allParticipants);
@@ -224,6 +241,7 @@ export class ChatEngine {
       }
 
       if (relationshipChanges.length > 0) {
+        this.logger.debug('Engine', 'relationshipChanges', `count=${relationshipChanges.length}`);
         this.callbacks.onRelationshipChange?.(relationshipChanges);
       }
 
@@ -238,6 +256,104 @@ export class ChatEngine {
   }
 
   // ─── Private Methods ──────────────────────────
+
+  /**
+   * Select which agents should respond when no @mention is present.
+   *
+   * Picks up to `maxRespondents` agents based on relevance:
+   * 1. Keyword match against agent role/duties
+   * 2. Department diversity (avoid all from same department)
+   * 3. Falls back to round-robin if no keyword match
+   */
+  private selectRespondents(
+    content: string,
+    participants: ParticipantInfo[]
+  ): ParticipantInfo[] {
+    const max = this.maxRespondents;
+    if (participants.length <= max) return participants;
+
+    const contentLower = content.toLowerCase();
+
+    // Score each agent by keyword relevance
+    const scored = participants.map(p => {
+      let score = 0;
+      // Match against role title
+      if (p.role && contentLower.includes(p.role.toLowerCase())) score += 3;
+      // Match against agent name
+      if (contentLower.includes(p.name.toLowerCase())) score += 5;
+      // Match against department
+      if (p.department && contentLower.includes(p.department.toLowerCase())) score += 2;
+      return { participant: p, score };
+    });
+
+    // Sort by score descending
+    scored.sort((a, b) => b.score - a.score);
+
+    // If nobody matches (all scores 0), pick diverse set by department
+    if (scored[0].score === 0) {
+      return this.selectDiverse(participants, max);
+    }
+
+    // Take top scored, ensuring department diversity
+    const selected: ParticipantInfo[] = [];
+    const departments = new Set<string>();
+
+    for (const { participant, score } of scored) {
+      if (selected.length >= max) break;
+      // Allow same department only if they have a positive score
+      if (score > 0 || !departments.has(participant.department ?? '')) {
+        selected.push(participant);
+        if (participant.department) departments.add(participant.department);
+      }
+    }
+
+    // Fill remaining slots if needed
+    if (selected.length < max) {
+      for (const { participant } of scored) {
+        if (selected.length >= max) break;
+        if (!selected.includes(participant)) {
+          selected.push(participant);
+        }
+      }
+    }
+
+    return selected;
+  }
+
+  /**
+   * Select a diverse set of agents across departments (round-robin style).
+   */
+  private selectDiverse(
+    participants: ParticipantInfo[],
+    max: number
+  ): ParticipantInfo[] {
+    // Group by department
+    const byDept = new Map<string, ParticipantInfo[]>();
+    for (const p of participants) {
+      const dept = p.department ?? 'unknown';
+      const list = byDept.get(dept) ?? [];
+      list.push(p);
+      byDept.set(dept, list);
+    }
+
+    // Round-robin across departments
+    const selected: ParticipantInfo[] = [];
+    const deptIterators = [...byDept.values()].map(list => ({ list, idx: 0 }));
+    let round = 0;
+
+    while (selected.length < max && round < participants.length) {
+      for (const iter of deptIterators) {
+        if (selected.length >= max) break;
+        if (iter.idx < iter.list.length) {
+          selected.push(iter.list[iter.idx]);
+          iter.idx++;
+        }
+      }
+      round++;
+    }
+
+    return selected;
+  }
 
   private createSession(): ChatSession {
     const participants: ParticipantInfo[] = this.config.agents.map(agent => ({

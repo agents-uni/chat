@@ -6,6 +6,7 @@
 
 import { Hono } from 'hono';
 import type { ChatEngine } from '../chat/engine.js';
+import type { Logger } from '../utils/logger.js';
 
 // ─── Connected clients for SSE-based broadcasting ──
 
@@ -29,6 +30,11 @@ export function createRoutes(engine: ChatEngine): Hono {
     onRelationshipChange: (changes) => {
       broadcast({ type: 'relationship_update', changes });
     },
+  });
+
+  // Register debug log callback for SSE push
+  engine.getLogger().onLog((entry) => {
+    broadcast({ type: 'debug_log', log: entry });
   });
 
   // ── SSE Broadcast ──

@@ -54,6 +54,10 @@ export interface ChatEngineOptions {
   pollIntervalMs?: number;
   /** OpenClaw workspace directory (default: ~/.openclaw) */
   openclawDir?: string;
+  /** Enable debug logging (default: false) */
+  debug?: boolean;
+  /** Max agents to respond when no @mention (default: 3) */
+  maxRespondents?: number;
 }
 
 // ─── Server Config ──────────────────────────────
@@ -64,6 +68,10 @@ export interface ServerConfig {
   openclawDir?: string;
   contextWindowSize?: number;
   responseTimeoutMs?: number;
+  /** Enable debug logging (default: false) */
+  debug?: boolean;
+  /** Max agents to respond when no @mention (default: 3) */
+  maxRespondents?: number;
 }
 
 // ─── WebSocket Messages ─────────────────────────
@@ -77,7 +85,8 @@ export type WSServerMessage =
   | { type: 'status_change'; status: ChatStatus }
   | { type: 'state'; session: ChatSession }
   | { type: 'error'; message: string }
-  | { type: 'relationship_update'; changes: RelationshipChange[] };
+  | { type: 'relationship_update'; changes: RelationshipChange[] }
+  | { type: 'debug_log'; log: DebugLogEntry };
 
 // ─── Relationship Tracking ──────────────────────
 
@@ -104,4 +113,14 @@ export interface AgentContext {
   isMentioned?: boolean;
   /** Whether the message is targeted (has @mentions at all) */
   isTargeted?: boolean;
+}
+
+// ─── Debug Logging ─────────────────────────────
+
+export interface DebugLogEntry {
+  timestamp: string;
+  source: string;
+  action: string;
+  detail?: string;
+  agentId?: string;
 }

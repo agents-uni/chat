@@ -17,9 +17,29 @@ Under the hood, it wraps OpenClaw's file protocol (TASK.md / SUBMISSION.md) in a
 - **Sequential Execution** — One message at a time; wait for all agents before sending the next
 - **Relationship Evolution** — Automatically infers relationship events from conversations (agreement/disagreement/collaboration/consensus)
 - **SSE Real-time** — Agent responses pushed to the browser instantly
+- **Debug Mode** — `--debug` enables full dispatch logging to terminal + SSE
 - **OpenClaw Compatible** — Uses TASK.md/SUBMISSION.md file protocol underneath
 
 ## Quick Start
+
+### Prerequisites
+
+1. **Install and configure OpenClaw** — agents run on the OpenClaw runtime
+2. **Deploy Universe** — use `bridge import` to import agents and run `deploy` to ensure `~/.openclaw/workspace-{agentId}/SOUL.md` exists for each agent
+3. **Start OpenClaw Gateway** — run `openclaw` to start the gateway. The chat service triggers agents via the `openclaw agent` CLI
+
+```bash
+# 1. Import agents (if not already imported)
+agents-uni bridge import ./agency-agents
+
+# 2. Deploy to OpenClaw
+agents-uni deploy
+
+# 3. Start OpenClaw gateway (keep running)
+openclaw
+```
+
+> **Important**: If the OpenClaw gateway is not running, the chat service will still start but all agents will time out with no responses.
 
 ### Install
 
@@ -50,6 +70,7 @@ Options:
   --openclaw-dir <path>       OpenClaw workspace directory
   --context-window <number>   Context window size (default: 20 messages)
   --timeout <number>          Agent response timeout in seconds (default: 120)
+  --debug                     Enable debug logging (default: off)
 ```
 
 ## Architecture
@@ -75,8 +96,8 @@ Options:
 ┌────────────────────┴────────────────────────────┐
 │            OpenClaw File Protocol                 │
 │                                                   │
-│  TASK.md ──→ Agent Workspace ──→ SUBMISSION.md   │
-│                                                   │
+│  TASK.md ──→ openclaw agent ──→ SUBMISSION.md    │
+│              (CLI trigger)                         │
 │  @agents-uni/core    @agents-uni/rel              │
 │  (Universe parser)   (Relationship engine)        │
 └──────────────────────────────────────────────────┘
@@ -90,8 +111,9 @@ Options:
 2. ChatEngine sets status to `processing` (input disabled)
 3. ContextManager builds personalized TASK.md for each agent (identity, relationships, chat history)
 4. ChatDispatcher writes TASK.md to each agent's OpenClaw workspace
-5. Polls for SUBMISSION.md, collects agent responses
-6. RelationshipTracker infers relationship events from responses
+5. Triggers each agent via `openclaw agent --agent {id}` CLI
+6. Polls for SUBMISSION.md, collects agent responses
+7. RelationshipTracker infers relationship events from responses
 7. Events fed to EvolutionEngine for relationship evolution
 8. Status returns to `idle`, user can send the next message
 
@@ -154,6 +176,45 @@ const responses = await engine.processMessage('What do you all think about this 
 - `@agents-uni/rel` — Multi-dimensional relationship engine, EvolutionEngine
 - `hono` — HTTP server
 - `commander` — CLI
+
+## Debug Mode
+
+Add `--debug` when starting to enable verbose dispatch logging:
+
+```bash
+npx agents-chat serve --debug --spec universe.yaml
+```
+
+The terminal will show colored logs for the entire dispatch pipeline:
+
+```
+[DEBUG][Engine] processMessage: content="@Alice what do you think?"
+[DEBUG][Engine] parseMentions: found=["alice"]
+[DEBUG][Engine] routing: targeted=true, agents=["alice"]
+[DEBUG][Dispatcher] writeTask: contentLength=1234 (alice)
+[DEBUG][Dispatcher] clearSubmission: (alice)
+[DEBUG][Dispatcher] poll: waiting=["alice"], elapsed=0ms
+[DEBUG][Dispatcher] poll: waiting=["alice"], elapsed=2000ms
+[DEBUG][Dispatcher] responseReceived: length=256 (alice)
+[DEBUG][Tracker] sentiment: from="alice" → to="dana", type="chat.agreement"
+[DEBUG][Engine] relationshipChanges: count=1
+```
+
+Debug logs are also pushed to the frontend via SSE (`debug_log` event type), making it easy to inspect in the browser console.
+
+Programmatic usage:
+
+```typescript
+const engine = new ChatEngine({
+  specPath: './universe.yaml',
+  debug: true,
+});
+
+// Listen to debug logs
+engine.getLogger().onLog((entry) => {
+  console.log(entry.source, entry.action, entry.detail);
+});
+```
 
 ## Design Philosophy
 
