@@ -97,6 +97,52 @@ describe('ContextManager', () => {
     });
   });
 
+  describe('parseMentions', () => {
+    const cm = new ContextManager({ windowSize: 10 });
+
+    it('should parse @agentId mentions', () => {
+      const result = cm.parseMentions('@alice what do you think?', participants);
+      expect(result).toEqual(['alice']);
+    });
+
+    it('should parse @agentName mentions (case-insensitive)', () => {
+      const result = cm.parseMentions('@Bob please review', participants);
+      expect(result).toEqual(['bob']);
+    });
+
+    it('should parse multiple mentions', () => {
+      const result = cm.parseMentions('@Alice and @Bob please discuss', participants);
+      expect(result).toContain('alice');
+      expect(result).toContain('bob');
+      expect(result).toHaveLength(2);
+    });
+
+    it('should handle @all and return all participants', () => {
+      const result = cm.parseMentions('@all what do you think?', participants);
+      expect(result).toEqual(['alice', 'bob']);
+    });
+
+    it('should handle Chinese @所有人', () => {
+      const result = cm.parseMentions('@所有人 大家好', participants);
+      expect(result).toEqual(['alice', 'bob']);
+    });
+
+    it('should return empty array when no mentions', () => {
+      const result = cm.parseMentions('hello everyone', participants);
+      expect(result).toEqual([]);
+    });
+
+    it('should ignore unknown @mentions', () => {
+      const result = cm.parseMentions('@unknown hi there', participants);
+      expect(result).toEqual([]);
+    });
+
+    it('should not duplicate mentions', () => {
+      const result = cm.parseMentions('@alice @Alice @alice', participants);
+      expect(result).toEqual(['alice']);
+    });
+  });
+
   describe('buildTaskContent', () => {
     it('should generate valid TASK.md content', () => {
       const cm = new ContextManager({ windowSize: 10 });
@@ -127,6 +173,49 @@ describe('ContextManager', () => {
       expect(content).toContain('Any suggestions?');
       expect(content).toContain('SUBMISSION.md');
       expect(content).toContain('trust +0.6');
+    });
+
+    it('should indicate @mention in TASK.md when agent is mentioned', () => {
+      const cm = new ContextManager({ windowSize: 10 });
+
+      const context: AgentContext = {
+        agentId: 'alice',
+        agentName: 'Alice',
+        roleDescription: 'Engineer',
+        traits: '',
+        constraints: '',
+        participants,
+        recentMessages: [],
+        currentMessage: '@Alice what do you think?',
+        isMentioned: true,
+        isTargeted: true,
+      };
+
+      const content = cm.buildTaskContent(context);
+
+      expect(content).toContain('You were @mentioned');
+      expect(content).toContain('directly @mentioned');
+    });
+
+    it('should indicate non-mentioned status when others are targeted', () => {
+      const cm = new ContextManager({ windowSize: 10 });
+
+      const context: AgentContext = {
+        agentId: 'bob',
+        agentName: 'Bob',
+        roleDescription: 'Designer',
+        traits: '',
+        constraints: '',
+        participants,
+        recentMessages: [],
+        currentMessage: '@Alice what do you think?',
+        isMentioned: false,
+        isTargeted: true,
+      };
+
+      const content = cm.buildTaskContent(context);
+
+      expect(content).toContain('@mentioned specific agents (not you)');
     });
 
     it('should handle empty messages and no relationships', () => {

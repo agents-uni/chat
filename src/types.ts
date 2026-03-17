@@ -15,6 +15,8 @@ export interface ChatMessage {
   timestamp: string;
   /** Optional: which message this replies to */
   replyTo?: string;
+  /** @mentioned agent IDs (parsed from content) */
+  mentions?: string[];
 }
 
 // ─── Chat Session ───────────────────────────────
@@ -98,4 +100,8 @@ export interface AgentContext {
   recentMessages: ChatMessage[];
   currentMessage: string;
   relationshipSummary?: string;
+  /** Whether this agent was @mentioned in the current message */
+  isMentioned?: boolean;
+  /** Whether the message is targeted (has @mentions at all) */
+  isTargeted?: boolean;
 }

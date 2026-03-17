@@ -157,27 +157,38 @@ export class ChatEngine {
     this.setStatus('processing');
 
     try {
+      // Parse @mentions
+      const allParticipants = this.session.participants;
+      const mentions = this.contextManager.parseMentions(content, allParticipants);
+      const isTargeted = mentions.length > 0;
+
       // Create user message
       const userMessage: ChatMessage = {
         id: `msg-user-${Date.now()}`,
         role: 'user',
         content,
         timestamp: new Date().toISOString(),
+        mentions: mentions.length > 0 ? mentions : undefined,
       };
 
       // Add to history
       this.session.messages.push(userMessage);
       this.callbacks.onMessage?.(userMessage);
 
-      // Get participants
-      const participants = this.session.participants;
+      // Route: @mention → only those agents; no @ → all agents
+      const targetParticipants = isTargeted
+        ? allParticipants.filter(p => mentions.includes(p.id))
+        : allParticipants;
 
       // Build per-agent context and dispatch
       const responses = await this.chatDispatcher.dispatchAndCollect(
         content,
-        participants,
+        targetParticipants,
         this.session.messages,
-        (agentId: string) => this.buildAgentContext(agentId, content)
+        (agentId: string) => this.buildAgentContext(agentId, content, {
+          isMentioned: mentions.includes(agentId),
+          isTargeted,
+        })
       );
 
       // Add responses to history and broadcast
@@ -187,7 +198,7 @@ export class ChatEngine {
       }
 
       // Infer relationship events
-      const inferredEvents = this.relationshipTracker.inferEvents(responses, participants);
+      const inferredEvents = this.relationshipTracker.inferEvents(responses, allParticipants);
       const relationshipChanges: RelationshipChange[] = [];
 
       for (const event of inferredEvents) {
@@ -248,7 +259,11 @@ export class ChatEngine {
     };
   }
 
-  private buildAgentContext(agentId: string, currentMessage: string): AgentContext {
+  private buildAgentContext(
+    agentId: string,
+    currentMessage: string,
+    mentionInfo: { isMentioned: boolean; isTargeted: boolean } = { isMentioned: false, isTargeted: false }
+  ): AgentContext {
     const agent = this.config.agents.find(a => a.id === agentId);
     if (!agent) {
       throw new Error(`Agent not found: ${agentId}`);
@@ -311,6 +326,8 @@ export class ChatEngine {
       recentMessages: messagesWithContext,
       currentMessage,
       relationshipSummary,
+      isMentioned: mentionInfo.isMentioned,
+      isTargeted: mentionInfo.isTargeted,
     };
   }
 

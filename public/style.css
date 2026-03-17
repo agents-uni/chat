@@ -564,6 +564,80 @@ body {
   background: var(--border-light);
 }
 
+/* ─── @Mention Dropdown ─── */
+
+.mention-dropdown {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  padding: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.mention-item:hover,
+.mention-item.selected {
+  background: var(--bg-hover);
+}
+
+.mention-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.mention-name {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.mention-role {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+/* ─── @Mention Highlights in Messages ─── */
+
+.mention-highlight {
+  font-weight: 600;
+  cursor: default;
+}
+
+.mention-all {
+  color: var(--warning) !important;
+}
+
+/* Make input-wrapper position relative for dropdown positioning */
+.input-wrapper {
+  position: relative;
+}
+
 /* ─── Responsive ─── */
 
 @media (max-width: 768px) {

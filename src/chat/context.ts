@@ -80,13 +80,23 @@ export class ContextManager {
     lines.push('## Current Message');
     lines.push('');
     lines.push(`[User]: ${context.currentMessage}`);
+    if (context.isMentioned) {
+      lines.push('');
+      lines.push('> **⚡ You were @mentioned in this message. The user is specifically addressing you.**');
+    }
     lines.push('');
 
     // ── Instructions ──
     lines.push('## Instructions');
     lines.push('');
-    lines.push('Respond naturally as your character in this group chat.');
-    lines.push('You may address other participants by name.');
+    if (context.isMentioned) {
+      lines.push('**You were directly @mentioned.** Respond with a focused, relevant answer.');
+    } else if (context.isTargeted) {
+      lines.push('Note: The user @mentioned specific agents (not you). You may still respond if you have something valuable to add, but keep it brief.');
+    } else {
+      lines.push('Respond naturally as your character in this group chat.');
+    }
+    lines.push('You may address other participants by @name.');
     lines.push('You may agree, disagree, or build upon others\' ideas.');
     lines.push('Keep your response concise (1-3 paragraphs).');
     lines.push('');
@@ -129,6 +139,41 @@ export class ContextManager {
       .join(', ');
 
     return `[Earlier: ${count} messages from ${senderSummary}]`;
+  }
+
+  /**
+   * Parse @mentions from message content.
+   * Supports: @agentId, @agentName (case-insensitive)
+   * Returns list of matched agent IDs.
+   */
+  parseMentions(content: string, participants: ParticipantInfo[]): string[] {
+    const mentionPattern = /@(\S+)/g;
+    const mentions: string[] = [];
+    const seen = new Set<string>();
+    let match: RegExpExecArray | null;
+
+    while ((match = mentionPattern.exec(content)) !== null) {
+      const token = match[1].toLowerCase();
+
+      // Check for @all
+      if (token === 'all' || token === '所有人' || token === '全体') {
+        return participants.map(p => p.id);
+      }
+
+      // Match against agent IDs and names
+      for (const p of participants) {
+        if (seen.has(p.id)) continue;
+        if (
+          p.id.toLowerCase() === token ||
+          p.name.toLowerCase() === token
+        ) {
+          mentions.push(p.id);
+          seen.add(p.id);
+        }
+      }
+    }
+
+    return mentions;
   }
 
   /**

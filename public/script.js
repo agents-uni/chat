@@ -10,6 +10,7 @@
 let session = null;
 let isProcessing = false;
 let eventSource = null;
+let agents = []; // { id, name, role } — for @mention autocomplete
 
 // Agent colors (rotate through these)
 const AGENT_COLORS = [
@@ -53,6 +54,7 @@ async function init() {
     agentCount.textContent = `${config.agents.length} agents`;
     document.title = `${config.name} · Agents Chat`;
 
+    agents = config.agents;
     renderParticipants(config.agents);
   } catch (err) {
     console.error('Failed to load config:', err);
@@ -118,10 +120,35 @@ function setupInputHandlers() {
   messageInput.addEventListener('input', () => {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
+    handleMentionInput();
   });
 
-  // Enter to send, Shift+Enter for newline
+  // Keyboard navigation
   messageInput.addEventListener('keydown', (e) => {
+    // If mention dropdown is open, handle navigation
+    if (mentionDropdown && mentionDropdown.style.display !== 'none') {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        moveMentionSelection(1);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        moveMentionSelection(-1);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        confirmMentionSelection();
+        return;
+      }
+      if (e.key === 'Escape') {
+        hideMentionDropdown();
+        return;
+      }
+    }
+
+    // Normal Enter to send
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -129,6 +156,133 @@ function setupInputHandlers() {
   });
 
   sendButton.addEventListener('click', sendMessage);
+
+  // Click outside to close dropdown
+  document.addEventListener('click', (e) => {
+    if (mentionDropdown && !mentionDropdown.contains(e.target) && e.target !== messageInput) {
+      hideMentionDropdown();
+    }
+  });
+
+  // Create mention dropdown element
+  createMentionDropdown();
+}
+
+// ─── @Mention Autocomplete ──────────────────────
+
+let mentionDropdown = null;
+let mentionSelectedIndex = 0;
+let mentionFilteredAgents = [];
+let mentionStartPos = -1;
+
+function createMentionDropdown() {
+  mentionDropdown = document.createElement('div');
+  mentionDropdown.className = 'mention-dropdown';
+  mentionDropdown.style.display = 'none';
+  document.querySelector('.input-wrapper').appendChild(mentionDropdown);
+}
+
+function handleMentionInput() {
+  const value = messageInput.value;
+  const cursorPos = messageInput.selectionStart;
+
+  // Find the @ before cursor
+  const textBeforeCursor = value.substring(0, cursorPos);
+  const atMatch = textBeforeCursor.match(/@(\S*)$/);
+
+  if (!atMatch) {
+    hideMentionDropdown();
+    return;
+  }
+
+  mentionStartPos = cursorPos - atMatch[0].length;
+  const query = atMatch[1].toLowerCase();
+
+  // Filter agents by query
+  mentionFilteredAgents = [
+    { id: '_all', name: 'all', role: 'Everyone' },
+    ...agents,
+  ].filter(a =>
+    a.id.toLowerCase().includes(query) ||
+    a.name.toLowerCase().includes(query)
+  );
+
+  if (mentionFilteredAgents.length === 0) {
+    hideMentionDropdown();
+    return;
+  }
+
+  mentionSelectedIndex = 0;
+  renderMentionDropdown();
+}
+
+function renderMentionDropdown() {
+  mentionDropdown.innerHTML = '';
+  mentionDropdown.style.display = 'block';
+
+  mentionFilteredAgents.forEach((agent, index) => {
+    const item = document.createElement('div');
+    item.className = 'mention-item' + (index === mentionSelectedIndex ? ' selected' : '');
+
+    const color = agent.id === '_all' ? '#fbbf24' : getAgentColor(agent.id);
+    const initial = agent.name.charAt(0).toUpperCase();
+
+    item.innerHTML = `
+      <span class="mention-avatar" style="background: ${color}">${initial}</span>
+      <span class="mention-name">${escapeHtml(agent.name)}</span>
+      <span class="mention-role">${escapeHtml(agent.role)}</span>
+    `;
+
+    item.addEventListener('mouseenter', () => {
+      mentionSelectedIndex = index;
+      renderMentionDropdown();
+    });
+
+    item.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      mentionSelectedIndex = index;
+      confirmMentionSelection();
+    });
+
+    mentionDropdown.appendChild(item);
+  });
+}
+
+function moveMentionSelection(delta) {
+  mentionSelectedIndex = (mentionSelectedIndex + delta + mentionFilteredAgents.length) % mentionFilteredAgents.length;
+  renderMentionDropdown();
+}
+
+function confirmMentionSelection() {
+  if (mentionFilteredAgents.length === 0) return;
+
+  const agent = mentionFilteredAgents[mentionSelectedIndex];
+  const value = messageInput.value;
+  const cursorPos = messageInput.selectionStart;
+
+  // Replace @query with @name
+  const before = value.substring(0, mentionStartPos);
+  const after = value.substring(cursorPos);
+  const mentionText = agent.id === '_all' ? '@all ' : `@${agent.name} `;
+
+  messageInput.value = before + mentionText + after;
+
+  // Move cursor after the mention
+  const newPos = mentionStartPos + mentionText.length;
+  messageInput.selectionStart = newPos;
+  messageInput.selectionEnd = newPos;
+
+  hideMentionDropdown();
+  messageInput.focus();
+}
+
+function hideMentionDropdown() {
+  if (mentionDropdown) {
+    mentionDropdown.style.display = 'none';
+  }
+  mentionStartPos = -1;
+  mentionFilteredAgents = [];
 }
 
 async function sendMessage() {
@@ -185,6 +339,11 @@ function renderParticipants(agents) {
 function createParticipantItem(agent, color) {
   const div = document.createElement('div');
   div.className = 'participant-item';
+  if (agent.id !== 'user') {
+    div.title = `Click to @${agent.name}`;
+    div.style.cursor = 'pointer';
+    div.addEventListener('click', () => insertMention(agent.name));
+  }
   div.innerHTML = `
     <div class="participant-avatar" style="background: ${color}">
       ${agent.name.charAt(0).toUpperCase()}
@@ -243,7 +402,7 @@ function appendMessage(msg, animate = true) {
     <div class="message-avatar" style="background: ${avatarColor}">${avatarChar}</div>
     <div class="message-body">
       <div class="message-sender">${escapeHtml(senderName)}</div>
-      <div class="message-content">${escapeHtml(msg.content)}</div>
+      <div class="message-content">${highlightMentions(escapeHtml(msg.content))}</div>
       <div class="message-time">${time}</div>
     </div>
   `;
@@ -358,6 +517,36 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
   return div.innerHTML;
+}
+
+/**
+ * Highlight @mentions in message text with colored spans.
+ * Input is already HTML-escaped.
+ */
+function highlightMentions(escapedText) {
+  return escapedText.replace(/@(\S+)/g, (match, name) => {
+    const lower = name.toLowerCase();
+    // Check if it's a known agent or "all"
+    const agent = agents.find(a => a.name.toLowerCase() === lower || a.id.toLowerCase() === lower);
+    if (agent) {
+      const color = getAgentColor(agent.id);
+      return `<span class="mention-highlight" style="color: ${color}">@${escapeHtml(agent.name)}</span>`;
+    }
+    if (lower === 'all' || lower === '所有人' || lower === '全体') {
+      return `<span class="mention-highlight mention-all">@${name}</span>`;
+    }
+    return match;
+  });
+}
+
+/**
+ * Insert @mention for a specific agent into the input.
+ */
+function insertMention(agentName) {
+  const value = messageInput.value;
+  const suffix = value.length > 0 && !value.endsWith(' ') ? ' ' : '';
+  messageInput.value = value + suffix + '@' + agentName + ' ';
+  messageInput.focus();
 }
 
 function scrollToBottom() {
