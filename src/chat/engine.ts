@@ -18,6 +18,9 @@ import {
   type RelEngineBundle,
 } from '@agents-uni/core';
 
+import { computeInfluence } from '@agents-uni/rel';
+import type { VisualizationData, VisualizationOptions } from '@agents-uni/rel';
+
 import { ContextManager } from './context.js';
 import { ChatDispatcher } from './dispatcher.js';
 import { RelationshipTracker } from '../relationship/tracker.js';
@@ -149,6 +152,28 @@ export class ChatEngine {
   }
 
   /**
+   * Get relationship visualization data (standardized format).
+   */
+  getVisualizationData(): VisualizationData {
+    const agentMetadata: Record<string, { name?: string; role?: string; department?: string }> = {};
+    for (const agent of this.config.agents) {
+      agentMetadata[agent.id] = {
+        name: agent.name,
+        role: agent.role.title,
+        department: agent.role.department,
+      };
+    }
+    return this.relBundle.graph.toVisualizationData({ agentMetadata });
+  }
+
+  /**
+   * Get the relationship engine bundle for external use.
+   */
+  getRelBundle(): RelEngineBundle {
+    return this.relBundle;
+  }
+
+  /**
    * Process a user message through the group chat.
    *
    * Routing:
@@ -260,10 +285,12 @@ export class ChatEngine {
   /**
    * Select which agents should respond when no @mention is present.
    *
-   * Picks up to `maxRespondents` agents based on relevance:
+   * Picks up to `maxRespondents` agents based on:
    * 1. Keyword match against agent role/duties
-   * 2. Department diversity (avoid all from same department)
-   * 3. Falls back to round-robin if no keyword match
+   * 2. Relationship scoring (allies/advisors of recent respondent get boost)
+   * 3. Influence scoring (high influence agents prioritized)
+   * 4. Department diversity (avoid all from same department)
+   * 5. Falls back to round-robin if no match
    */
   private selectRespondents(
     content: string,
@@ -274,23 +301,55 @@ export class ChatEngine {
 
     const contentLower = content.toLowerCase();
 
-    // Score each agent by keyword relevance
+    // Compute influence scores
+    const influenceScores = computeInfluence(this.relBundle.graph);
+    const influenceMap = new Map<string, number>();
+    for (const score of influenceScores) {
+      influenceMap.set(score.agentId, score.score);
+    }
+
+    // Get recent respondent IDs for relationship-based boosting
+    const recentRespondentIds = this.getRecentRespondentIds(3);
+
+    // Score each agent by keyword relevance + relationship boost
     const scored = participants.map(p => {
       let score = 0;
-      // Match against role title
+
+      // Keyword match against role title
       if (p.role && contentLower.includes(p.role.toLowerCase())) score += 3;
-      // Match against agent name
+      // Keyword match against agent name
       if (contentLower.includes(p.name.toLowerCase())) score += 5;
-      // Match against department
+      // Keyword match against department
       if (p.department && contentLower.includes(p.department.toLowerCase())) score += 2;
+
+      // Relationship boost: allies/advisors of recent respondents
+      for (const recentId of recentRespondentIds) {
+        const trustValue = this.relBundle.graph.getDimensionValue(recentId, p.id, 'trust');
+        if (trustValue !== undefined && trustValue > 0.3) score += 1;
+
+        const rivalryValue = this.relBundle.graph.getDimensionValue(recentId, p.id, 'rivalry');
+        if (rivalryValue !== undefined && rivalryValue > 0.3) score += 0.5;
+      }
+
+      // Influence boost
+      const influence = influenceMap.get(p.id) ?? 0;
+      score += influence * 2;
+
       return { participant: p, score };
     });
 
     // Sort by score descending
     scored.sort((a, b) => b.score - a.score);
 
-    // If nobody matches (all scores 0), pick diverse set by department
-    if (scored[0].score === 0) {
+    this.logger.debug('Engine', 'selectRespondents', `scores=${JSON.stringify(scored.map(s => ({ id: s.participant.id, score: s.score.toFixed(2) })))}`);
+
+    // If nobody has keyword/relationship matches (only influence), use diverse selection
+    const hasKeywordMatch = scored.some(s => {
+      const influence = influenceMap.get(s.participant.id) ?? 0;
+      return s.score - influence * 2 > 0;
+    });
+
+    if (!hasKeywordMatch) {
       return this.selectDiverse(participants, max);
     }
 
@@ -373,6 +432,21 @@ export class ChatEngine {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Get IDs of the N most recent agent respondents (for relationship boosting).
+   */
+  private getRecentRespondentIds(n: number): string[] {
+    const ids: string[] = [];
+    const messages = this.session.messages;
+    for (let i = messages.length - 1; i >= 0 && ids.length < n; i--) {
+      const msg = messages[i];
+      if (msg.role === 'agent' && msg.agentId && !ids.includes(msg.agentId)) {
+        ids.push(msg.agentId);
+      }
+    }
+    return ids;
   }
 
   private buildAgentContext(

@@ -138,6 +138,27 @@ Detects the following patterns from agent responses:
 | References/expands another agent's ideas | `chat.collaboration` | trust +0.03, synergy +0.05 |
 | Majority of agents express agreement | `chat.consensus` | trust +0.02, synergy +0.02 |
 
+### Relationship-Driven Routing
+
+`selectRespondents()` now layers relationship scoring on top of keyword matching:
+
+- Allies of the most recent responding agent (trust > 0.3): +1 point
+- Rivals of the most recent responding agent (rivalry > 0.3): +0.5 points
+- High-influence agents: +influence×2 points
+- Behavior is unchanged when no relationships exist, fully backward-compatible
+
+### Graph Visualization
+
+The sidebar now includes a List/Graph toggle. Graph mode uses vis-network to render the relationship graph:
+
+- Node size = influence, color = cluster
+- Edge color = valence, thickness = strength
+- Auto-refreshes on relationship changes + displays notifications in the chat stream
+
+### Event Timeline
+
+New `GET /api/relations/timeline` endpoint returns the 50 most recent relationship change events.
+
 ## API
 
 ### HTTP Endpoints
@@ -147,6 +168,7 @@ Detects the following patterns from agent responses:
 | GET | `/api/state` | Current session state |
 | GET | `/api/config` | Universe configuration |
 | GET | `/api/relations` | Relationship graph data |
+| GET | `/api/relations/timeline` | 50 most recent relationship change events |
 | GET | `/api/events` | SSE real-time event stream |
 | POST | `/api/message` | Send a user message |
 

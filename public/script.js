@@ -109,6 +109,18 @@ function handleServerEvent(data) {
 
     case 'relationship_update':
       loadRelationships();
+      // Show lightweight notification in chat
+      if (data.changes && data.changes.length > 0) {
+        const changeDesc = data.changes.map(c =>
+          `${c.from} → ${c.to}: ${c.eventType}`
+        ).join(', ');
+        appendMessage({
+          id: `rel-${Date.now()}`,
+          role: 'system',
+          content: `Relationship update: ${changeDesc}`,
+          timestamp: new Date().toISOString(),
+        });
+      }
       break;
   }
 }
@@ -470,17 +482,45 @@ function showError(message) {
 
 // ─── Relationships ──────────────────────────────
 
+let relViewMode = 'list'; // 'list' or 'graph'
+let relNetwork = null;
+let lastVizData = null;
+
 async function loadRelationships() {
   try {
     const res = await fetch('/api/relations');
-    const relations = await res.json();
-    renderRelationships(relations);
+    const vizData = await res.json();
+    lastVizData = vizData;
+
+    if (relViewMode === 'list') {
+      renderRelationships(vizData);
+    } else {
+      renderRelationshipGraph(vizData);
+    }
   } catch {
     // Silently fail
   }
 }
 
-function renderRelationships(relations) {
+function setRelView(mode) {
+  relViewMode = mode;
+  document.getElementById('listViewBtn').classList.toggle('active', mode === 'list');
+  document.getElementById('graphViewBtn').classList.toggle('active', mode === 'graph');
+  document.getElementById('relationshipList').style.display = mode === 'list' ? '' : 'none';
+  document.getElementById('relationshipGraph').style.display = mode === 'graph' ? '' : 'none';
+
+  if (lastVizData) {
+    if (mode === 'list') {
+      renderRelationships(lastVizData);
+    } else {
+      renderRelationshipGraph(lastVizData);
+    }
+  }
+}
+
+function renderRelationships(vizData) {
+  // Convert VisualizationData edges to the list format
+  const relations = vizData.edges || [];
   if (!relations || relations.length === 0) {
     relationshipList.innerHTML = '<div class="empty-state">No relationship data yet</div>';
     return;
@@ -488,13 +528,13 @@ function renderRelationships(relations) {
 
   relationshipList.innerHTML = '';
 
-  for (const rel of relations) {
-    if (!rel.dimensions || rel.dimensions.length === 0) continue;
+  for (const edge of relations) {
+    if (!edge.dimensions || edge.dimensions.length === 0) continue;
 
     const div = document.createElement('div');
     div.className = 'relationship-item';
 
-    const dims = rel.dimensions
+    const dims = edge.dimensions
       .filter(d => Math.abs(d.value) > 0.1)
       .map(d => {
         const cls = d.value >= 0 ? 'positive' : 'negative';
@@ -504,11 +544,60 @@ function renderRelationships(relations) {
       .join(' ');
 
     div.innerHTML = `
-      <span class="rel-agents">${escapeHtml(rel.from)} → ${escapeHtml(rel.to)}</span>
+      <span class="rel-agents">${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</span>
       ${dims}
     `;
     relationshipList.appendChild(div);
   }
+}
+
+function renderRelationshipGraph(vizData) {
+  const container = document.getElementById('relationshipGraph');
+  if (!container || typeof vis === 'undefined') return;
+
+  const CLUSTER_COLORS = [
+    '#7c5cfc', '#f472b6', '#34d399', '#fbbf24',
+    '#60a5fa', '#c084fc', '#fb923c', '#2dd4bf',
+  ];
+
+  const clusterColorMap = {};
+  (vizData.clusters || []).forEach((c, i) => {
+    clusterColorMap[c.id] = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
+  });
+
+  const nodes = new vis.DataSet((vizData.nodes || []).map(n => ({
+    id: n.id,
+    label: n.label || n.id,
+    size: 10 + n.influence * 20,
+    color: {
+      background: clusterColorMap[n.clusterId] || '#64748b',
+      border: '#334155',
+      highlight: { background: '#c084fc', border: '#7c3aed' },
+    },
+    font: { color: '#e0e0e8', size: 10 },
+  })));
+
+  const edges = new vis.DataSet((vizData.edges || []).map(e => ({
+    id: e.id,
+    from: e.from,
+    to: e.to,
+    width: 1 + e.strength * 3,
+    color: {
+      color: e.valence > 0.1 ? '#4ade80' : e.valence < -0.1 ? '#f87171' : '#64748b',
+    },
+    arrows: 'to',
+    smooth: { type: 'curvedCW', roundness: 0.2 },
+  })));
+
+  if (relNetwork) {
+    relNetwork.destroy();
+  }
+
+  relNetwork = new vis.Network(container, { nodes, edges }, {
+    physics: { barnesHut: { gravitationalConstant: -2000, springLength: 100 } },
+    interaction: { hover: true },
+    layout: { improvedLayout: true },
+  });
 }
 
 // ─── Utilities ──────────────────────────────────

@@ -108,10 +108,41 @@ export function createRoutes(engine: ChatEngine): Hono {
   });
 
   /**
-   * GET /api/relations — Relationship graph data
+   * GET /api/relations — Relationship visualization data (enhanced format)
    */
   app.get('/relations', (c) => {
-    return c.json(engine.getRelationships());
+    return c.json(engine.getVisualizationData());
+  });
+
+  /**
+   * GET /api/relations/timeline — Recent relationship events (last 50)
+   */
+  app.get('/relations/timeline', (c) => {
+    const relBundle = engine.getRelBundle();
+    const allRels = relBundle.graph.getAllRelationships();
+    const events: Array<{
+      timestamp: string;
+      from: string;
+      to: string;
+      type: string;
+      description?: string;
+    }> = [];
+
+    for (const rel of allRels) {
+      for (const evt of rel.memory.shortTerm) {
+        events.push({
+          timestamp: evt.timestamp,
+          from: rel.from,
+          to: rel.to,
+          type: evt.type,
+          description: evt.description,
+        });
+      }
+    }
+
+    // Sort by timestamp descending, take 50
+    events.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return c.json(events.slice(0, 50));
   });
 
   /**

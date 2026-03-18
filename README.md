@@ -138,6 +138,27 @@ Options:
 | 引用/扩展其他 agent 的观点 | `chat.collaboration` | trust +0.03, synergy +0.05 |
 | 多数 agent 表达共识 | `chat.consensus` | trust +0.02, synergy +0.02 |
 
+### 关系驱动路由
+
+`selectRespondents()` 现在在关键词匹配基础上叠加关系评分：
+
+- 最近回复 agent 的盟友（trust > 0.3）：+1 分
+- 最近回复 agent 的对手（rivalry > 0.3）：+0.5 分
+- 高 influence agent：+influence×2 分
+- 无关系时行为不变，完全向后兼容
+
+### 图谱可视化
+
+侧边栏新增 List/Graph 切换，Graph 模式使用 vis-network 渲染关系图谱：
+
+- 节点大小=influence，颜色=cluster
+- 边颜色=valence，粗细=strength
+- 关系变化时自动刷新 + 聊天流中显示通知
+
+### 事件时间线
+
+新增 `GET /api/relations/timeline` 返回最近 50 条关系变化事件。
+
 ## API
 
 ### HTTP 端点
@@ -147,6 +168,7 @@ Options:
 | GET | `/api/state` | 当前会话状态 |
 | GET | `/api/config` | Universe 配置 |
 | GET | `/api/relations` | 关系图数据 |
+| GET | `/api/relations/timeline` | 最近 50 条关系变化事件 |
 | GET | `/api/events` | SSE 实时事件流 |
 | POST | `/api/message` | 发送用户消息 |
 

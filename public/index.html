@@ -26,10 +26,17 @@
       </div>
 
       <div class="sidebar-section">
-        <h3 class="sidebar-title">Relationships</h3>
+        <div class="sidebar-title-row">
+          <h3 class="sidebar-title">Relationships</h3>
+          <div class="view-toggle">
+            <button id="listViewBtn" class="toggle-btn active" onclick="setRelView('list')">List</button>
+            <button id="graphViewBtn" class="toggle-btn" onclick="setRelView('graph')">Graph</button>
+          </div>
+        </div>
         <div id="relationshipList" class="relationship-list">
           <div class="empty-state">No relationship data yet</div>
         </div>
+        <div id="relationshipGraph" class="relationship-graph" style="display:none;"></div>
       </div>
 
       <div class="sidebar-footer">
@@ -86,6 +93,7 @@
     </main>
   </div>
 
+  <script src="https://unpkg.com/vis-network@9/standalone/umd/vis-network.min.js"></script>
   <script src="/script.js"></script>
 </body>
 </html>
