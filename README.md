@@ -30,10 +30,10 @@
 
 ```bash
 # 1. 导入 agent（如果还没导入）
-agents-uni bridge import ./agency-agents
+uni bridge import ./agency-agents
 
 # 2. 部署到 OpenClaw
-agents-uni deploy
+uni deploy
 
 # 3. 启动 OpenClaw gateway（保持运行）
 openclaw
