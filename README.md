@@ -33,7 +33,7 @@
 uni bridge import ./agency-agents
 
 # 2. 部署到 OpenClaw
-uni deploy
+uni deploy universe.yaml
 
 # 3. 启动 OpenClaw gateway（保持运行）
 openclaw
