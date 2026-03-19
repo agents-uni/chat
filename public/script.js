@@ -11,6 +11,7 @@ let session = null;
 let isProcessing = false;
 let eventSource = null;
 let agents = []; // { id, name, role } — for @mention autocomplete
+let isComposing = false; // IME composition guard
 
 // Agent colors (rotate through these)
 const AGENT_COLORS = [
@@ -111,13 +112,22 @@ function handleServerEvent(data) {
       loadRelationships();
       // Show lightweight notification in chat
       if (data.changes && data.changes.length > 0) {
-        const changeDesc = data.changes.map(c =>
-          `${c.from} → ${c.to}: ${c.eventType}`
-        ).join(', ');
+        const changeDesc = data.changes.map(c => {
+          const eventMap = {
+            'chat.agreement': '达成共识',
+            'chat.disagreement': '产生分歧',
+            'chat.trust': '信任增加',
+            'chat.distrust': '信任降低',
+            'chat.support': '表示支持',
+            'chat.oppose': '表示反对',
+          };
+          const label = eventMap[c.eventType] || c.eventType;
+          return `${c.from} → ${c.to}：${label}`;
+        }).join('；');
         appendMessage({
           id: `rel-${Date.now()}`,
           role: 'system',
-          content: `Relationship update: ${changeDesc}`,
+          content: `关系变化：${changeDesc}`,
           timestamp: new Date().toISOString(),
         });
       }
@@ -133,7 +143,12 @@ function setupInputHandlers() {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
     handleMentionInput();
+    updateSendButtonState();
   });
+
+  // IME composition guards (prevents Enter from sending during CJK input)
+  messageInput.addEventListener('compositionstart', () => { isComposing = true; });
+  messageInput.addEventListener('compositionend', () => { isComposing = false; });
 
   // Keyboard navigation
   messageInput.addEventListener('keydown', (e) => {
@@ -160,14 +175,17 @@ function setupInputHandlers() {
       }
     }
 
-    // Normal Enter to send
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Normal Enter to send — skip if IME is composing
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isComposing) {
       e.preventDefault();
       sendMessage();
     }
   });
 
   sendButton.addEventListener('click', sendMessage);
+
+  // Initialize send button state
+  updateSendButtonState();
 
   // Click outside to close dropdown
   document.addEventListener('click', (e) => {
@@ -304,6 +322,7 @@ async function sendMessage() {
   // Clear input immediately
   messageInput.value = '';
   messageInput.style.height = 'auto';
+  updateSendButtonState();
 
   // Send via HTTP (SSE will broadcast the messages)
   try {
@@ -410,14 +429,29 @@ function appendMessage(msg, animate = true) {
     hour12: false,
   });
 
-  div.innerHTML = `
-    <div class="message-avatar" style="background: ${avatarColor}">${avatarChar}</div>
-    <div class="message-body">
-      <div class="message-sender">${escapeHtml(senderName)}</div>
-      <div class="message-content">${highlightMentions(escapeHtml(msg.content))}</div>
-      <div class="message-time">${time}</div>
-    </div>
-  `;
+  // Render content: Markdown for agent messages, plain escape for others
+  const escapedContent = escapeHtml(msg.content);
+  const renderedContent = msg.role === 'agent'
+    ? renderMarkdown(escapedContent)
+    : highlightMentions(escapedContent);
+
+  if (msg.role === 'system') {
+    // Compact pill style for system messages
+    div.innerHTML = `
+      <div class="message-body">
+        <div class="message-content">${renderedContent}</div>
+      </div>
+    `;
+  } else {
+    div.innerHTML = `
+      <div class="message-avatar" style="background: ${avatarColor}">${avatarChar}</div>
+      <div class="message-body">
+        <div class="message-sender">${escapeHtml(senderName)}</div>
+        <div class="message-content">${renderedContent}</div>
+        <div class="message-time">${time}</div>
+      </div>
+    `;
+  }
 
   messagesContainer.appendChild(div);
   scrollToBottom();
@@ -522,7 +556,7 @@ function renderRelationships(vizData) {
   // Convert VisualizationData edges to the list format
   const relations = vizData.edges || [];
   if (!relations || relations.length === 0) {
-    relationshipList.innerHTML = '<div class="empty-state">No relationship data yet</div>';
+    relationshipList.innerHTML = '<div class="empty-state">开始对话后，Agent 之间的关系将在这里展示</div>';
     return;
   }
 
@@ -534,17 +568,32 @@ function renderRelationships(vizData) {
     const div = document.createElement('div');
     div.className = 'relationship-item';
 
+    const fromColor = getAgentColor(edge.from);
+    const toColor = getAgentColor(edge.to);
+
     const dims = edge.dimensions
       .filter(d => Math.abs(d.value) > 0.1)
       .map(d => {
         const cls = d.value >= 0 ? 'positive' : 'negative';
         const sign = d.value >= 0 ? '+' : '';
-        return `<span class="rel-dim ${cls}">${d.type} ${sign}${d.value.toFixed(1)}</span>`;
+        const pct = Math.min(Math.abs(d.value) * 100, 100);
+        return `
+          <div class="rel-dim-row">
+            <span class="rel-dim ${cls}">${d.type} ${sign}${d.value.toFixed(1)}</span>
+            <div class="rel-strength-bar">
+              <div class="rel-strength-fill ${cls}" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
       })
-      .join(' ');
+      .join('');
 
     div.innerHTML = `
-      <span class="rel-agents">${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</span>
+      <div class="rel-agents">
+        <span style="color: ${fromColor}">${escapeHtml(edge.from)}</span>
+        <span class="rel-arrow">→</span>
+        <span style="color: ${toColor}">${escapeHtml(edge.to)}</span>
+      </div>
       ${dims}
     `;
     relationshipList.appendChild(div);
@@ -565,28 +614,68 @@ function renderRelationshipGraph(vizData) {
     clusterColorMap[c.id] = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
   });
 
-  const nodes = new vis.DataSet((vizData.nodes || []).map(n => ({
-    id: n.id,
-    label: n.label || n.id,
-    size: 10 + n.influence * 20,
-    color: {
-      background: clusterColorMap[n.clusterId] || '#64748b',
-      border: '#334155',
-      highlight: { background: '#c084fc', border: '#7c3aed' },
-    },
-    font: { color: '#e0e0e8', size: 10 },
-  })));
+  // Compute per-node average valence for glow color
+  const nodeValence = {};
+  (vizData.edges || []).forEach(e => {
+    [e.from, e.to].forEach(nid => {
+      if (!nodeValence[nid]) nodeValence[nid] = [];
+      nodeValence[nid].push(e.valence || 0);
+    });
+  });
+
+  const nodes = new vis.DataSet((vizData.nodes || []).map(n => {
+    const baseColor = clusterColorMap[n.clusterId] || '#64748b';
+    const vals = nodeValence[n.id] || [0];
+    const avgValence = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const glowColor = avgValence > 0.1 ? 'rgba(74,222,128,0.4)' : avgValence < -0.1 ? 'rgba(248,113,113,0.4)' : 'rgba(100,116,139,0.3)';
+
+    return {
+      id: n.id,
+      label: n.label || n.id,
+      size: 12 + n.influence * 22,
+      color: {
+        background: baseColor,
+        border: glowColor,
+        highlight: { background: '#c084fc', border: '#7c3aed' },
+        hover: { background: baseColor, border: '#fff' },
+      },
+      borderWidth: 3,
+      borderWidthSelected: 4,
+      font: { color: '#e0e0e8', size: 12, strokeWidth: 3, strokeColor: '#0a0a0f' },
+      shadow: { enabled: true, color: glowColor, size: 10, x: 0, y: 0 },
+    };
+  }));
+
+  // Map valence to color gradient (red → gray → green)
+  function valenceToColor(v) {
+    const clamped = Math.max(-1, Math.min(1, v));
+    if (clamped >= 0) {
+      const t = clamped;
+      const r = Math.round(100 + (74 - 100) * t);
+      const g = Math.round(116 + (222 - 116) * t);
+      const b = Math.round(139 + (128 - 139) * t);
+      return `rgb(${r},${g},${b})`;
+    }
+    const t = -clamped;
+    const r = Math.round(100 + (248 - 100) * t);
+    const g = Math.round(116 + (113 - 116) * t);
+    const b = Math.round(139 + (113 - 139) * t);
+    return `rgb(${r},${g},${b})`;
+  }
 
   const edges = new vis.DataSet((vizData.edges || []).map(e => ({
     id: e.id,
     from: e.from,
     to: e.to,
-    width: 1 + e.strength * 3,
+    width: 1 + e.strength * 4,
     color: {
-      color: e.valence > 0.1 ? '#4ade80' : e.valence < -0.1 ? '#f87171' : '#64748b',
+      color: valenceToColor(e.valence || 0),
+      highlight: '#c084fc',
+      hover: '#e0e0e8',
     },
-    arrows: 'to',
+    arrows: { to: { enabled: true, scaleFactor: 0.5 } },
     smooth: { type: 'curvedCW', roundness: 0.2 },
+    hoverWidth: 1.5,
   })));
 
   if (relNetwork) {
@@ -594,8 +683,16 @@ function renderRelationshipGraph(vizData) {
   }
 
   relNetwork = new vis.Network(container, { nodes, edges }, {
-    physics: { barnesHut: { gravitationalConstant: -2000, springLength: 100 } },
-    interaction: { hover: true },
+    physics: {
+      barnesHut: {
+        gravitationalConstant: -1500,
+        springLength: 150,
+        springConstant: 0.04,
+        damping: 0.09,
+      },
+      stabilization: { iterations: 100, fit: true },
+    },
+    interaction: { hover: true, tooltipDelay: 200 },
     layout: { improvedLayout: true },
   });
 }
@@ -639,7 +736,68 @@ function insertMention(agentName) {
 }
 
 function scrollToBottom() {
-  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  const threshold = 100;
+  const distFromBottom = messagesContainer.scrollHeight - messagesContainer.scrollTop - messagesContainer.clientHeight;
+  if (distFromBottom < threshold) {
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  }
+}
+
+/**
+ * Lightweight Markdown renderer for agent messages.
+ * Input must already be HTML-escaped for XSS safety.
+ */
+function renderMarkdown(escapedText) {
+  let text = escapedText;
+
+  // Code blocks: ```...```
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, _lang, code) => {
+    return `<pre class="md-code-block"><code>${code.trim()}</code></pre>`;
+  });
+
+  // Inline code: `...`
+  text = text.replace(/`([^`\n]+)`/g, '<code class="md-inline-code">$1</code>');
+
+  // Bold: **...**
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  // Italic: *...*
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+  // Unordered lists: lines starting with - or *
+  text = text.replace(/^([*\-]) (.+)$/gm, '<li>$2</li>');
+  text = text.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul class="md-list">$1</ul>');
+
+  // Ordered lists: lines starting with 1. 2. etc.
+  text = text.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  text = text.replace(/((?:<li>.*<\/li>\n?)+)/g, (match) => {
+    // Avoid double-wrapping already wrapped <ul>
+    if (match.startsWith('<ul')) return match;
+    return `<ol class="md-list">${match}</ol>`;
+  });
+
+  // Highlight @mentions
+  text = highlightMentions(text);
+
+  return text;
+}
+
+/**
+ * Update send button disabled state based on input content.
+ */
+function updateSendButtonState() {
+  const hasContent = messageInput.value.trim().length > 0;
+  sendButton.classList.toggle('empty', !hasContent && !isProcessing);
+}
+
+/**
+ * Toggle mobile sidebar.
+ */
+function toggleSidebar() {
+  const sidebar = document.querySelector('.sidebar');
+  const overlay = document.querySelector('.sidebar-overlay');
+  sidebar.classList.toggle('open');
+  overlay.classList.toggle('open');
 }
 
 // ─── Start ──────────────────────────────────────

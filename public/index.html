@@ -8,6 +8,9 @@
 </head>
 <body>
   <div class="app">
+    <!-- Sidebar Overlay (mobile) -->
+    <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
+
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-header">
@@ -34,7 +37,7 @@
           </div>
         </div>
         <div id="relationshipList" class="relationship-list">
-          <div class="empty-state">No relationship data yet</div>
+          <div class="empty-state">开始对话后，Agent 之间的关系将在这里展示</div>
         </div>
         <div id="relationshipGraph" class="relationship-graph" style="display:none;"></div>
       </div>
@@ -49,6 +52,7 @@
       <!-- Chat Header -->
       <header class="chat-header">
         <div class="chat-header-info">
+          <button class="mobile-menu-btn" onclick="toggleSidebar()" title="Toggle sidebar">☰</button>
           <h2 id="chatTitle">Group Chat</h2>
           <span class="chat-status" id="chatStatus">
             <span class="status-dot idle"></span>
