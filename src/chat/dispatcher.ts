@@ -8,7 +8,7 @@
  * - Uses `openclaw agent` CLI to trigger execution
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { TaskDispatcher, type WorkspaceIO } from '@agents-uni/core';
 import { ContextManager } from './context.js';
 import type { ChatMessage, ParticipantInfo, AgentContext } from '../types.js';
@@ -24,6 +24,7 @@ const AGENT_TRIGGER_MESSAGE =
   '1) Read the TASK.md file. ' +
   '2) Complete the task described in it. ' +
   '3) Write your complete response to a file called SUBMISSION.md in the same workspace directory using the write tool. ' +
+  '4) After writing SUBMISSION.md, create an empty file named .SUBMISSION_DONE in the same directory to signal completion. ' +
   'Only write the response content to SUBMISSION.md — no metadata or headers.';
 
 /**
@@ -90,7 +91,7 @@ export class ChatDispatcher {
         await this.io.writeTask(agent.id, taskContent);
         this.logger?.debug('Dispatcher', 'writeTask', `contentLength=${taskContent.length}`, agent.id);
 
-        // Clear stale submission
+        // Clear stale submission + done marker
         try {
           await this.io.clearSubmission(agent.id);
         } catch {
@@ -98,10 +99,10 @@ export class ChatDispatcher {
         }
 
         // Trigger agent via openclaw CLI
-        this.triggerAgent(agent.id);
+        const child = this.triggerAgent(agent.id);
 
-        // Poll for this agent's response
-        const response = await this.pollForSingleResponse(agent);
+        // Poll for this agent's response (with crash detection)
+        const response = await this.pollForSingleResponse(agent, child);
 
         if (response) {
           responses.push(response);
@@ -140,9 +141,9 @@ export class ChatDispatcher {
 
   /**
    * Trigger a single agent via `openclaw agent` CLI.
-   * Fire-and-forget — the polling loop detects the response.
+   * Returns the ChildProcess so the poller can detect crashes.
    */
-  private triggerAgent(agentId: string): void {
+  private triggerAgent(agentId: string): ChildProcess | null {
     try {
       const child = spawn('openclaw', [
         'agent',
@@ -157,6 +158,8 @@ export class ChatDispatcher {
       child.on('error', (err) => {
         this.logger?.debug('Dispatcher', 'triggerAgentFailed', err.message, agentId);
       });
+
+      return child;
     } catch (err) {
       this.logger?.debug(
         'Dispatcher',
@@ -168,16 +171,35 @@ export class ChatDispatcher {
         `[ChatDispatcher] Failed to trigger agent ${agentId}:`,
         err instanceof Error ? err.message : err
       );
+      return null;
     }
   }
 
   /**
    * Poll for a single agent's SUBMISSION.md response.
+   * Detects agent crashes via the child process exit code.
    */
   private async pollForSingleResponse(
-    agent: ParticipantInfo
+    agent: ParticipantInfo,
+    child: ChildProcess | null
   ): Promise<ChatMessage | null> {
     const startTime = Date.now();
+    const CRASH_GRACE_MS = 5000;
+
+    // Track child process exit
+    let childExited = false;
+    let childExitCode: number | null = null;
+
+    if (child) {
+      child.on('exit', (code) => {
+        childExited = true;
+        childExitCode = code;
+      });
+    } else {
+      // spawn failed — treat as immediate crash
+      childExited = true;
+      childExitCode = 1;
+    }
 
     while (true) {
       const elapsed = Date.now() - startTime;
@@ -195,8 +217,40 @@ export class ChatDispatcher {
             timestamp: new Date().toISOString(),
           };
         }
-      } catch {
-        // transient read failure, retry
+      } catch (err) {
+        // transient read failure — log and retry
+        this.logger?.debug(
+          'Dispatcher',
+          'readRetry',
+          err instanceof Error ? err.message : String(err),
+          agent.id
+        );
+      }
+
+      // Crash detection: process exited with non-zero and no submission
+      if (childExited && childExitCode !== 0) {
+        this.logger?.debug(
+          'Dispatcher',
+          'agentCrashed',
+          `exitCode=${childExitCode}`,
+          agent.id
+        );
+        return null;
+      }
+
+      // Normal exit (code 0) but no submission yet — short grace window
+      if (childExited && childExitCode === 0) {
+        const sinceStart = Date.now() - startTime;
+        // Give a short grace period after clean exit for file flush
+        if (sinceStart > CRASH_GRACE_MS) {
+          this.logger?.debug(
+            'Dispatcher',
+            'agentExitedNoSubmission',
+            `gracePeriodExceeded`,
+            agent.id
+          );
+          return null;
+        }
       }
 
       const remainingMs = this.responseTimeoutMs - (Date.now() - startTime);
