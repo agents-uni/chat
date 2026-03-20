@@ -164,6 +164,54 @@ export function createRoutes(engine: ChatEngine): Hono {
   });
 
   /**
+   * PATCH /api/relations — Manually correct a relationship dimension value
+   *
+   * Body: { from: string, to: string, dimension: string, value: number }
+   */
+  app.patch('/relations', async (c) => {
+    try {
+      const body = await c.req.json<{
+        from: string;
+        to: string;
+        dimension: string;
+        value: number;
+      }>();
+
+      if (!body.from || !body.to || !body.dimension || typeof body.value !== 'number') {
+        return c.json({ error: 'from, to, dimension (string) and value (number) are required' }, 400);
+      }
+
+      if (body.value < -1 || body.value > 1) {
+        return c.json({ error: 'value must be between -1 and 1' }, 400);
+      }
+
+      const relBundle = engine.getRelBundle();
+      const currentValue = relBundle.graph.getDimensionValue(body.from, body.to, body.dimension);
+      const delta = body.value - (currentValue ?? 0);
+
+      relBundle.graph.applyEventBetween(body.from, body.to, {
+        type: 'manual.correction',
+        impact: { [body.dimension]: delta },
+      });
+
+      broadcast({
+        type: 'relationship_update',
+        changes: [{
+          from: body.from,
+          to: body.to,
+          eventType: 'manual.correction',
+        }],
+      });
+
+      return c.json(engine.getVisualizationData());
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      console.error('[ChatServer] Error updating relation:', err);
+      return c.json({ error: message }, 500);
+    }
+  });
+
+  /**
    * POST /api/message — Send a user message
    *
    * Body: { content: string }

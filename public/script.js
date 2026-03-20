@@ -552,58 +552,23 @@ function setRelView(mode) {
   }
 }
 
-function renderRelationships(vizData) {
-  // Convert VisualizationData edges to the list format
-  const relations = vizData.edges || [];
-  if (!relations || relations.length === 0) {
-    relationshipList.innerHTML = '<div class="empty-state">开始对话后，Agent 之间的关系将在这里展示</div>';
-    return;
-  }
-
-  relationshipList.innerHTML = '';
-
-  for (const edge of relations) {
-    if (!edge.dimensions || edge.dimensions.length === 0) continue;
-
-    const div = document.createElement('div');
-    div.className = 'relationship-item';
-
-    const fromColor = getAgentColor(edge.from);
-    const toColor = getAgentColor(edge.to);
-
-    const dims = edge.dimensions
-      .filter(d => Math.abs(d.value) > 0.1)
-      .map(d => {
-        const cls = d.value >= 0 ? 'positive' : 'negative';
-        const sign = d.value >= 0 ? '+' : '';
-        const pct = Math.min(Math.abs(d.value) * 100, 100);
-        return `
-          <div class="rel-dim-row">
-            <span class="rel-dim ${cls}">${d.type} ${sign}${d.value.toFixed(1)}</span>
-            <div class="rel-strength-bar">
-              <div class="rel-strength-fill ${cls}" style="width: ${pct}%"></div>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-
-    div.innerHTML = `
-      <div class="rel-agents">
-        <span style="color: ${fromColor}">${escapeHtml(edge.from)}</span>
-        <span class="rel-arrow">→</span>
-        <span style="color: ${toColor}">${escapeHtml(edge.to)}</span>
-      </div>
-      ${dims}
-    `;
-    relationshipList.appendChild(div);
-  }
-}
-
 function renderRelationshipGraph(vizData) {
   const container = document.getElementById('relationshipGraph');
   if (!container || typeof vis === 'undefined') return;
 
+  if (relNetwork) {
+    relNetwork.destroy();
+  }
+
+  const { nodes, edges, options } = createGraphConfig(vizData);
+  relNetwork = new vis.Network(container, { nodes, edges }, options);
+}
+
+/**
+ * Build vis.js nodes, edges, and options from vizData.
+ * Shared between sidebar graph and fullscreen modal.
+ */
+function createGraphConfig(vizData) {
   const CLUSTER_COLORS = [
     '#7c5cfc', '#f472b6', '#34d399', '#fbbf24',
     '#60a5fa', '#c084fc', '#fb923c', '#2dd4bf',
@@ -614,13 +579,18 @@ function renderRelationshipGraph(vizData) {
     clusterColorMap[c.id] = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
   });
 
-  // Compute per-node average valence for glow color
   const nodeValence = {};
   (vizData.edges || []).forEach(e => {
     [e.from, e.to].forEach(nid => {
       if (!nodeValence[nid]) nodeValence[nid] = [];
       nodeValence[nid].push(e.valence || 0);
     });
+  });
+
+  // Build agent metadata lookup for tooltips
+  const agentMeta = {};
+  (vizData.nodes || []).forEach(n => {
+    agentMeta[n.id] = n;
   });
 
   const nodes = new vis.DataSet((vizData.nodes || []).map(n => {
@@ -632,6 +602,7 @@ function renderRelationshipGraph(vizData) {
     return {
       id: n.id,
       label: n.label || n.id,
+      title: n.role ? `${n.label || n.id}\n${n.role}` : (n.label || n.id),
       size: 12 + n.influence * 22,
       color: {
         background: baseColor,
@@ -646,7 +617,6 @@ function renderRelationshipGraph(vizData) {
     };
   }));
 
-  // Map valence to color gradient (red → gray → green)
   function valenceToColor(v) {
     const clamped = Math.max(-1, Math.min(1, v));
     if (clamped >= 0) {
@@ -663,26 +633,28 @@ function renderRelationshipGraph(vizData) {
     return `rgb(${r},${g},${b})`;
   }
 
-  const edges = new vis.DataSet((vizData.edges || []).map(e => ({
-    id: e.id,
-    from: e.from,
-    to: e.to,
-    width: 1 + e.strength * 4,
-    color: {
-      color: valenceToColor(e.valence || 0),
-      highlight: '#c084fc',
-      hover: '#e0e0e8',
-    },
-    arrows: { to: { enabled: true, scaleFactor: 0.5 } },
-    smooth: { type: 'curvedCW', roundness: 0.2 },
-    hoverWidth: 1.5,
-  })));
+  const edges = new vis.DataSet((vizData.edges || []).map(e => {
+    const dimTooltip = (e.dimensions || [])
+      .map(d => `${d.type}: ${d.value >= 0 ? '+' : ''}${d.value.toFixed(2)}`)
+      .join('\n');
+    return {
+      id: e.id,
+      from: e.from,
+      to: e.to,
+      width: 1 + e.strength * 4,
+      title: `${e.from} → ${e.to}\n${dimTooltip}`,
+      color: {
+        color: valenceToColor(e.valence || 0),
+        highlight: '#c084fc',
+        hover: '#e0e0e8',
+      },
+      arrows: { to: { enabled: true, scaleFactor: 0.5 } },
+      smooth: { type: 'curvedCW', roundness: 0.2 },
+      hoverWidth: 1.5,
+    };
+  }));
 
-  if (relNetwork) {
-    relNetwork.destroy();
-  }
-
-  relNetwork = new vis.Network(container, { nodes, edges }, {
+  const options = {
     physics: {
       barnesHut: {
         gravitationalConstant: -1500,
@@ -694,7 +666,9 @@ function renderRelationshipGraph(vizData) {
     },
     interaction: { hover: true, tooltipDelay: 200 },
     layout: { improvedLayout: true },
-  });
+  };
+
+  return { nodes, edges, options };
 }
 
 // ─── Utilities ──────────────────────────────────
@@ -798,6 +772,237 @@ function toggleSidebar() {
   const overlay = document.querySelector('.sidebar-overlay');
   sidebar.classList.toggle('open');
   overlay.classList.toggle('open');
+}
+
+// ─── Fullscreen Graph Modal ─────────────────────
+
+let modalNetwork = null;
+
+function openGraphModal() {
+  const modal = document.getElementById('graphModal');
+  modal.classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  // Render fullscreen graph
+  if (lastVizData) {
+    renderModalGraph(lastVizData);
+  }
+}
+
+function closeGraphModal() {
+  const modal = document.getElementById('graphModal');
+  modal.classList.remove('open');
+  document.body.style.overflow = '';
+  closeModalPanel();
+
+  if (modalNetwork) {
+    modalNetwork.destroy();
+    modalNetwork = null;
+  }
+}
+
+function renderModalGraph(vizData) {
+  const container = document.getElementById('graphModalCanvas');
+  if (!container || typeof vis === 'undefined') return;
+
+  if (modalNetwork) {
+    modalNetwork.destroy();
+  }
+
+  const { nodes, edges, options } = createGraphConfig(vizData);
+  modalNetwork = new vis.Network(container, { nodes, edges }, options);
+
+  // Edge click → open edit panel
+  modalNetwork.on('selectEdge', (params) => {
+    if (params.edges.length === 1) {
+      const edgeId = params.edges[0];
+      const edge = (vizData.edges || []).find(e => e.id === edgeId);
+      if (edge) {
+        showModalEdgePanel(edge);
+      }
+    }
+  });
+
+  // Click canvas background → close panel
+  modalNetwork.on('deselectEdge', () => {
+    closeModalPanel();
+  });
+}
+
+function showModalEdgePanel(edge) {
+  const panel = document.getElementById('graphModalPanel');
+  panel.classList.add('open');
+
+  const dims = edge.dimensions || [];
+  const dimRows = dims.map(d => {
+    const val = d.value.toFixed(1);
+    return `
+      <div class="edit-dim-row">
+        <label class="edit-dim-label">${escapeHtml(d.type)}</label>
+        <input type="range" class="edit-dim-slider" min="-1" max="1" step="0.1"
+               value="${d.value}" data-dim="${escapeHtml(d.type)}"
+               oninput="this.nextElementSibling.textContent = parseFloat(this.value).toFixed(1)">
+        <span class="edit-dim-value">${val}</span>
+      </div>
+    `;
+  }).join('');
+
+  panel.innerHTML = `
+    <div class="edit-panel-header">
+      <h4>${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</h4>
+      <button class="edit-panel-close" onclick="closeModalPanel()">&times;</button>
+    </div>
+    <div class="edit-panel-body">
+      ${dims.length === 0 ? '<p class="edit-empty">暂无维度数据</p>' : dimRows}
+    </div>
+    ${dims.length > 0 ? `
+    <div class="edit-panel-footer">
+      <button class="edit-save-btn" onclick="saveModalEdge('${escapeHtml(edge.from)}', '${escapeHtml(edge.to)}')">保存</button>
+      <button class="edit-cancel-btn" onclick="closeModalPanel()">取消</button>
+    </div>` : ''}
+  `;
+}
+
+function closeModalPanel() {
+  const panel = document.getElementById('graphModalPanel');
+  panel.classList.remove('open');
+  panel.innerHTML = '';
+}
+
+async function saveModalEdge(from, to) {
+  const panel = document.getElementById('graphModalPanel');
+  const sliders = panel.querySelectorAll('.edit-dim-slider');
+  const saveBtn = panel.querySelector('.edit-save-btn');
+  if (saveBtn) saveBtn.disabled = true;
+
+  for (const slider of sliders) {
+    const dimension = slider.dataset.dim;
+    const value = parseFloat(slider.value);
+    await updateRelationDimension(from, to, dimension, value);
+  }
+
+  closeModalPanel();
+}
+
+// ESC key closes modal
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('graphModal').classList.contains('open')) {
+    closeGraphModal();
+  }
+});
+
+// ─── Inline Relation Editing (List View) ────────
+
+function renderRelationships(vizData) {
+  const relations = vizData.edges || [];
+  if (!relations || relations.length === 0) {
+    relationshipList.innerHTML = '<div class="empty-state">开始对话后，Agent 之间的关系将在这里展示</div>';
+    return;
+  }
+
+  relationshipList.innerHTML = '';
+
+  for (const edge of relations) {
+    if (!edge.dimensions || edge.dimensions.length === 0) continue;
+
+    const div = document.createElement('div');
+    div.className = 'relationship-item';
+
+    const fromColor = getAgentColor(edge.from);
+    const toColor = getAgentColor(edge.to);
+
+    const dims = edge.dimensions
+      .filter(d => Math.abs(d.value) > 0.1)
+      .map(d => {
+        const cls = d.value >= 0 ? 'positive' : 'negative';
+        const sign = d.value >= 0 ? '+' : '';
+        const pct = Math.min(Math.abs(d.value) * 100, 100);
+        return `
+          <div class="rel-dim-row">
+            <span class="rel-dim ${cls}">${d.type} ${sign}${d.value.toFixed(1)}</span>
+            <div class="rel-strength-bar">
+              <div class="rel-strength-fill ${cls}" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    const edgeFrom = escapeHtml(edge.from);
+    const edgeTo = escapeHtml(edge.to);
+
+    div.innerHTML = `
+      <div class="rel-agents">
+        <span style="color: ${fromColor}">${edgeFrom}</span>
+        <span class="rel-arrow">→</span>
+        <span style="color: ${toColor}">${edgeTo}</span>
+        <button class="rel-edit-btn" onclick="toggleInlineEdit(this, '${edgeFrom}', '${edgeTo}')" title="编辑">&#9998;</button>
+      </div>
+      ${dims}
+      <div class="rel-inline-edit" style="display:none;"></div>
+    `;
+    relationshipList.appendChild(div);
+  }
+}
+
+function toggleInlineEdit(btn, from, to) {
+  const item = btn.closest('.relationship-item');
+  const editDiv = item.querySelector('.rel-inline-edit');
+
+  if (editDiv.style.display !== 'none') {
+    editDiv.style.display = 'none';
+    editDiv.innerHTML = '';
+    return;
+  }
+
+  // Find the edge data
+  const edge = (lastVizData?.edges || []).find(e => e.from === from && e.to === to);
+  if (!edge || !edge.dimensions) return;
+
+  const dimRows = edge.dimensions.map(d => `
+    <div class="edit-dim-row">
+      <label class="edit-dim-label">${escapeHtml(d.type)}</label>
+      <input type="range" class="edit-dim-slider" min="-1" max="1" step="0.1"
+             value="${d.value}" data-dim="${escapeHtml(d.type)}"
+             oninput="this.nextElementSibling.textContent = parseFloat(this.value).toFixed(1)">
+      <span class="edit-dim-value">${d.value.toFixed(1)}</span>
+    </div>
+  `).join('');
+
+  editDiv.innerHTML = `
+    ${dimRows}
+    <div class="edit-inline-actions">
+      <button class="edit-save-btn" onclick="saveInlineEdit(this, '${escapeHtml(from)}', '${escapeHtml(to)}')">保存</button>
+      <button class="edit-cancel-btn" onclick="this.closest('.rel-inline-edit').style.display='none'">取消</button>
+    </div>
+  `;
+  editDiv.style.display = 'block';
+}
+
+async function saveInlineEdit(btn, from, to) {
+  const editDiv = btn.closest('.rel-inline-edit');
+  const sliders = editDiv.querySelectorAll('.edit-dim-slider');
+  btn.disabled = true;
+
+  for (const slider of sliders) {
+    const dimension = slider.dataset.dim;
+    const value = parseFloat(slider.value);
+    await updateRelationDimension(from, to, dimension, value);
+  }
+
+  editDiv.style.display = 'none';
+  editDiv.innerHTML = '';
+}
+
+// ─── Relation Update API ────────────────────────
+
+async function updateRelationDimension(from, to, dimension, value) {
+  await fetch('/api/relations', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from, to, dimension, value }),
+  });
+  await loadRelationships();
 }
 
 // ─── Start ──────────────────────────────────────
