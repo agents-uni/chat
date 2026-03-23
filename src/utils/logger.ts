@@ -14,8 +14,12 @@ import type { DebugLogEntry } from '../types.js';
 export interface Logger {
   /** Verbose log — only outputs when debug=true */
   debug(source: string, action: string, detail?: string, agentId?: string): void;
-  /** Always outputs (startup info, errors, etc.) */
+  /** Always outputs (startup info, etc.) */
   info(source: string, action: string, detail?: string): void;
+  /** Warning — always outputs */
+  warn(source: string, action: string, detail?: string): void;
+  /** Error — always outputs */
+  error(source: string, action: string, detail?: string): void;
   /** Register a callback to receive log entries (for SSE push) */
   onLog(callback: LogCallback): void;
 }
@@ -64,6 +68,16 @@ export function createLogger(debug: boolean): Logger {
         console.log(chalk.blue(`[INFO][${source}]`) + ` ${action}` + (detail ? ` ${detail}` : ''));
         notifyListeners(entry);
       },
+      warn(source, action, detail?) {
+        const entry = buildEntry(source, action, detail);
+        console.warn(chalk.yellow(`[WARN][${source}]`) + ` ${action}` + (detail ? ` ${detail}` : ''));
+        notifyListeners(entry);
+      },
+      error(source, action, detail?) {
+        const entry = buildEntry(source, action, detail);
+        console.error(chalk.red(`[ERROR][${source}]`) + ` ${action}` + (detail ? ` ${detail}` : ''));
+        notifyListeners(entry);
+      },
       onLog: registerOnLog,
     };
   }
@@ -74,6 +88,12 @@ export function createLogger(debug: boolean): Logger {
     },
     info(source, action, detail?) {
       console.log(`[${source}] ${action}` + (detail ? ` ${detail}` : ''));
+    },
+    warn(source, action, detail?) {
+      console.warn(`[WARN][${source}] ${action}` + (detail ? ` ${detail}` : ''));
+    },
+    error(source, action, detail?) {
+      console.error(`[ERROR][${source}] ${action}` + (detail ? ` ${detail}` : ''));
     },
     onLog: registerOnLog,
   };

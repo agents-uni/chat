@@ -6,7 +6,6 @@
 
 import { Hono } from 'hono';
 import type { ChatEngine } from '../chat/engine.js';
-import type { Logger } from '../utils/logger.js';
 
 // ─── Connected clients for SSE-based broadcasting ──
 
@@ -39,13 +38,14 @@ export function createRoutes(engine: ChatEngine): Hono {
 
   // ── SSE Broadcast ──
 
+  const encoder = new TextEncoder();
+
   function broadcast(data: Record<string, unknown>): void {
     const payload = `data: ${JSON.stringify(data)}\n\n`;
     const deadClients: string[] = [];
 
     for (const client of clients) {
       try {
-        const encoder = new TextEncoder();
         client.controller.enqueue(encoder.encode(payload));
       } catch {
         deadClients.push(client.id);
@@ -65,10 +65,10 @@ export function createRoutes(engine: ChatEngine): Hono {
     const stream = new ReadableStream({
       start(controller) {
         const clientId = `client-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        clients.push({ id: clientId, controller });
+        const client: SSEClient = { id: clientId, controller };
+        clients.push(client);
 
         // Send initial state
-        const encoder = new TextEncoder();
         const session = engine.getSession();
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify({ type: 'state', session })}\n\n`)
@@ -82,9 +82,22 @@ export function createRoutes(engine: ChatEngine): Hono {
             clearInterval(keepAlive);
           }
         }, 30_000);
+
+        // Store keepAlive ref for cleanup on cancel
+        (controller as unknown as Record<string, unknown>).__keepAlive = keepAlive;
+        (controller as unknown as Record<string, unknown>).__clientId = clientId;
       },
-      cancel() {
-        // Client disconnected — cleanup handled by broadcast
+      cancel(controller) {
+        // Client disconnected — clean up keepalive and remove from list
+        const ctrl = controller as unknown as Record<string, unknown>;
+        if (ctrl.__keepAlive) {
+          clearInterval(ctrl.__keepAlive as ReturnType<typeof setInterval>);
+        }
+        const clientId = ctrl.__clientId as string | undefined;
+        if (clientId) {
+          const idx = clients.findIndex(c => c.id === clientId);
+          if (idx >= 0) clients.splice(idx, 1);
+        }
       },
     });
 

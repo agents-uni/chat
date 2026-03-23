@@ -61,14 +61,32 @@ program
       process.exit(1);
     }
 
+    const contextWindow = parseInt(opts.contextWindow, 10);
+    if (isNaN(contextWindow) || contextWindow < 1) {
+      console.error('Error: Invalid context window size');
+      process.exit(1);
+    }
+
+    const timeoutSec = parseInt(opts.timeout, 10);
+    if (isNaN(timeoutSec) || timeoutSec < 1) {
+      console.error('Error: Invalid timeout value');
+      process.exit(1);
+    }
+
+    const maxRespondents = parseInt(opts.maxRespondents, 10);
+    if (isNaN(maxRespondents) || maxRespondents < 1) {
+      console.error('Error: Invalid max-respondents value');
+      process.exit(1);
+    }
+
     await startServer({
       port,
       specPath,
       openclawDir: opts.openclawDir,
-      contextWindowSize: parseInt(opts.contextWindow, 10),
-      responseTimeoutMs: parseInt(opts.timeout, 10) * 1000,
+      contextWindowSize: contextWindow,
+      responseTimeoutMs: timeoutSec * 1000,
       debug: opts.debug ?? false,
-      maxRespondents: parseInt(opts.maxRespondents, 10),
+      maxRespondents,
     });
   });
 

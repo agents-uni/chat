@@ -66,7 +66,6 @@ export class RelationshipTracker {
     participants: ParticipantInfo[]
   ): InferredEvent[] {
     const events: InferredEvent[] = [];
-    const participantMap = new Map(participants.map(p => [p.id, p]));
 
     for (const response of responses) {
       if (response.role !== 'agent' || !response.agentId) continue;

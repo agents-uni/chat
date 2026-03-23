@@ -128,9 +128,10 @@ export class ChatDispatcher {
           err instanceof Error ? err.message : String(err),
           agent.id
         );
-        console.warn(
-          `[ChatDispatcher] Failed to dispatch to ${agent.id}:`,
-          err instanceof Error ? err.message : err
+        this.logger?.warn(
+          'Dispatcher',
+          'agentFailed',
+          `agent=${agent.id}: ${err instanceof Error ? err.message : String(err)}`
         );
         // Continue to next agent
       }
@@ -167,9 +168,10 @@ export class ChatDispatcher {
         err instanceof Error ? err.message : String(err),
         agentId
       );
-      console.warn(
-        `[ChatDispatcher] Failed to trigger agent ${agentId}:`,
-        err instanceof Error ? err.message : err
+      this.logger?.warn(
+        'Dispatcher',
+        'triggerAgentFailed',
+        `agent=${agentId}: ${err instanceof Error ? err.message : String(err)}`
       );
       return null;
     }
