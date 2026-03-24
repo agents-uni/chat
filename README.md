@@ -8,7 +8,7 @@
 
 `@agents-uni/chat` 为 agent universe 提供一个本地群聊 Web 服务。用户可以在浏览器中和所有 agent 进行群聊对话，agent 之间也可以互相引用、讨论、协作。
 
-底层基于 OpenClaw 的文件协议（TASK.md / SUBMISSION.md），是对 OpenClaw 的群聊封装。
+底层基于 OpenClaw 的文件协议（TASK.md / SUBMISSION.md / `.SUBMISSION_DONE`），是对 OpenClaw 的群聊封装。
 
 ## 特性
 
@@ -18,7 +18,8 @@
 - **关系进化** — 从对话中自动推断关系事件（赞同/分歧/协作/共识）
 - **SSE 实时推送** — agent 回复即刻推送到浏览器
 - **Debug 模式** — `--debug` 开启完整调度日志，终端 + SSE 同步输出
-- **OpenClaw 兼容** — 底层使用 TASK.md/SUBMISSION.md 文件协议
+- **OpenClaw 兼容** — 底层使用 TASK.md / SUBMISSION.md / `.SUBMISSION_DONE` 文件协议
+- **结构化日志** — Logger 支持 debug/info/warn/error 四级日志
 
 ## 快速开始
 
@@ -112,10 +113,10 @@ Options:
 3. ContextManager 为每个 agent 构建个性化 TASK.md（包含身份、关系、聊天历史）
 4. ChatDispatcher 将 TASK.md 写入各 agent 的 OpenClaw workspace
 5. 通过 `openclaw agent --agent {id}` 触发每个 agent 处理任务
-6. 轮询 SUBMISSION.md，收集 agent 回复
+6. 轮询 `.SUBMISSION_DONE` 标记 → 读取 SUBMISSION.md，收集 agent 回复
 7. RelationshipTracker 从回复中推断关系事件
-7. 事件喂入 EvolutionEngine 进行关系进化
-8. 状态回到 `idle`，用户可发送下一条消息
+8. 事件喂入 EvolutionEngine 进行关系进化
+9. 状态回到 `idle`，用户可发送下一条消息
 
 ### 上下文窗口
 
@@ -240,9 +241,9 @@ engine.getLogger().onLog((entry) => {
 
 ## 设计理念
 
-- **OpenClaw 优先** — 不绕过文件协议，而是封装它
+- **OpenClaw 优先** — 不绕过文件协议，而是封装它（`.SUBMISSION_DONE` 写完标记防止读到半截文件）
 - **顺序简化** — MVP 阶段一次一条消息，未来可迭代为并发
-- **关系驱动** — 每轮对话都产生关系信号，agent 间的关系随对话演进
+- **关系驱动** — 每轮对话都产生关系信号，agent 间的关系随对话演进；支持互评自动驱动关系演化
 - **最小依赖** — 前端纯 HTML/CSS/JS，无构建步骤
 
 ## License
