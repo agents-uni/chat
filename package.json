@@ -1,6 +1,6 @@
 {
   "name": "@agents-uni/chat",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Group chat service for agent universes — a conversational wrapper over OpenClaw",
   "type": "module",
   "main": "dist/index.js",
@@ -44,7 +44,7 @@
     "type": "git",
     "url": "git+https://github.com/agents-uni/chat.git"
   },
-  "homepage": "https://github.com/agents-uni/chat#readme",
+  "homepage": "https://agents-uni.github.io",
   "bugs": {
     "url": "https://github.com/agents-uni/chat/issues"
   },

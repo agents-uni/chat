@@ -2,6 +2,18 @@
  * @agents-uni/chat — Type definitions for group chat service.
  */
 
+// ─── Conversation Modes ─────────────────────────
+
+export type ConversationMode = 'sequential' | 'debate' | 'brainstorm';
+export type ExportFormat = 'json' | 'markdown';
+
+export interface PaginatedMessages {
+  messages: ChatMessage[];
+  page: number;
+  total: number;
+  hasMore: boolean;
+}
+
 // ─── Chat Messages ──────────────────────────────
 
 export interface ChatMessage {
@@ -58,6 +70,8 @@ export interface ChatEngineOptions {
   debug?: boolean;
   /** Max agents to respond when no @mention (default: 3) */
   maxRespondents?: number;
+  /** Conversation mode (default: 'sequential') */
+  mode?: ConversationMode;
 }
 
 // ─── Server Config ──────────────────────────────
@@ -86,7 +100,10 @@ export type WSServerMessage =
   | { type: 'state'; session: ChatSession }
   | { type: 'error'; message: string }
   | { type: 'relationship_update'; changes: RelationshipChange[] }
-  | { type: 'debug_log'; log: DebugLogEntry };
+  | { type: 'debug_log'; log: DebugLogEntry }
+  | { type: 'agent_thinking'; agentId: string; agentName: string }
+  | { type: 'agent_done'; agentId: string }
+  | { type: 'agent_error'; agentId: string; error: string };
 
 // ─── Relationship Tracking ──────────────────────
 

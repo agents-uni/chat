@@ -33,6 +33,7 @@ import type {
   AgentContext,
   ChatEngineOptions,
   RelationshipChange,
+  ConversationMode,
 } from '../types.js';
 
 // ─── Event Callback Types ───────────────────────
@@ -41,6 +42,9 @@ export interface ChatEngineCallbacks {
   onMessage?: (message: ChatMessage) => void;
   onStatusChange?: (status: ChatStatus) => void;
   onRelationshipChange?: (changes: RelationshipChange[]) => void;
+  onAgentThinking?: (agentId: string, agentName: string) => void;
+  onAgentDone?: (agentId: string) => void;
+  onAgentError?: (agentId: string, error: string) => void;
 }
 
 // ─── Chat Engine ────────────────────────────────
@@ -54,6 +58,7 @@ export class ChatEngine {
   private readonly relBundle: RelEngineBundle;
   private readonly logger: Logger;
   private readonly maxRespondents: number;
+  private mode: ConversationMode;
 
   private session: ChatSession;
   private callbacks: ChatEngineCallbacks = {};
@@ -68,6 +73,9 @@ export class ChatEngine {
 
     // Max agents to respond when no @mention (default 3)
     this.maxRespondents = options.maxRespondents ?? 3;
+
+    // Conversation mode
+    this.mode = options.mode ?? 'sequential';
 
     // Initialize workspace IO
     this.io = new FileWorkspaceIO({
@@ -121,6 +129,21 @@ export class ChatEngine {
    */
   getLogger(): Logger {
     return this.logger;
+  }
+
+  /**
+   * Get the current conversation mode.
+   */
+  getMode(): ConversationMode {
+    return this.mode;
+  }
+
+  /**
+   * Set the conversation mode.
+   */
+  setMode(mode: ConversationMode): void {
+    this.mode = mode;
+    this.logger.debug('Engine', 'setMode', `mode=${mode}`);
   }
 
   /**
@@ -220,24 +243,21 @@ export class ChatEngine {
       this.logger.debug(
         'Engine',
         'routing',
-        `targeted=${isTargeted}, agents=${JSON.stringify(targetParticipants.map(p => p.id))}`
+        `targeted=${isTargeted}, mode=${this.mode}, agents=${JSON.stringify(targetParticipants.map(p => p.id))}`
       );
 
-      // Serial dispatch with per-response callback
-      const responses = await this.chatDispatcher.dispatchAndCollect(
-        content,
-        targetParticipants,
-        this.session.messages,
-        (agentId: string) => this.buildAgentContext(agentId, content, {
-          isMentioned: mentions.includes(agentId),
-          isTargeted,
-        }),
-        // Called after each agent responds — adds to history so next agent sees it
-        (response: ChatMessage) => {
-          this.session.messages.push(response);
-          this.callbacks.onMessage?.(response);
-        }
-      );
+      let responses: ChatMessage[];
+
+      if (this.mode === 'brainstorm') {
+        // Brainstorm: parallel dispatch all agents, collect all, then broadcast together
+        responses = await this.processBrainstorm(content, targetParticipants, mentions, isTargeted);
+      } else if (this.mode === 'debate') {
+        // Debate: first round sequential, then a rebuttal round
+        responses = await this.processDebate(content, targetParticipants, mentions, isTargeted);
+      } else {
+        // Sequential: one by one (default current behavior)
+        responses = await this.processSequential(content, targetParticipants, mentions, isTargeted);
+      }
 
       // Infer relationship events
       const inferredEvents = this.relationshipTracker.inferEvents(responses, allParticipants);
@@ -281,6 +301,122 @@ export class ChatEngine {
   }
 
   // ─── Private Methods ──────────────────────────
+
+  /**
+   * Sequential mode: dispatch one at a time, each sees prior responses.
+   */
+  private async processSequential(
+    content: string,
+    participants: ParticipantInfo[],
+    mentions: string[],
+    isTargeted: boolean
+  ): Promise<ChatMessage[]> {
+    return this.chatDispatcher.dispatchAndCollect(
+      content,
+      participants,
+      this.session.messages,
+      (agentId: string) => this.buildAgentContext(agentId, content, {
+        isMentioned: mentions.includes(agentId),
+        isTargeted,
+      }),
+      (response: ChatMessage) => {
+        this.session.messages.push(response);
+        this.callbacks.onMessage?.(response);
+      },
+      {
+        onAgentThinking: (agentId, agentName) => this.callbacks.onAgentThinking?.(agentId, agentName),
+        onAgentDone: (agentId) => this.callbacks.onAgentDone?.(agentId),
+        onAgentError: (agentId, error) => this.callbacks.onAgentError?.(agentId, error),
+      }
+    );
+  }
+
+  /**
+   * Brainstorm mode: parallel dispatch all agents, collect all responses, broadcast together.
+   */
+  private async processBrainstorm(
+    content: string,
+    participants: ParticipantInfo[],
+    mentions: string[],
+    isTargeted: boolean
+  ): Promise<ChatMessage[]> {
+    // Emit thinking for all agents simultaneously
+    for (const p of participants) {
+      this.callbacks.onAgentThinking?.(p.id, p.name);
+    }
+
+    // Dispatch all in parallel via individual calls
+    const responsePromises = participants.map(async (agent) => {
+      try {
+        const responses = await this.chatDispatcher.dispatchAndCollect(
+          content,
+          [agent],
+          this.session.messages,
+          (agentId: string) => this.buildAgentContext(agentId, content, {
+            isMentioned: mentions.includes(agentId),
+            isTargeted,
+          }),
+        );
+        this.callbacks.onAgentDone?.(agent.id);
+        return responses[0] ?? null;
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.callbacks.onAgentError?.(agent.id, errorMsg);
+        return null;
+      }
+    });
+
+    const results = await Promise.all(responsePromises);
+    const responses: ChatMessage[] = [];
+
+    for (const response of results) {
+      if (response) {
+        responses.push(response);
+        this.session.messages.push(response);
+        this.callbacks.onMessage?.(response);
+      }
+    }
+
+    return responses;
+  }
+
+  /**
+   * Debate mode: first round sequential, then rebuttal round (max 2 rounds).
+   */
+  private async processDebate(
+    content: string,
+    participants: ParticipantInfo[],
+    mentions: string[],
+    isTargeted: boolean
+  ): Promise<ChatMessage[]> {
+    // Round 1: Sequential responses
+    const round1 = await this.processSequential(content, participants, mentions, isTargeted);
+
+    if (round1.length < 2) return round1;
+
+    // Round 2: Each agent sees all round 1 responses and can rebut
+    const rebuttalContent = `[Debate Round 2] Based on the responses above, please provide your rebuttal or refined position. Address specific points from other agents.`;
+    const round2 = await this.chatDispatcher.dispatchAndCollect(
+      rebuttalContent,
+      participants,
+      this.session.messages,
+      (agentId: string) => this.buildAgentContext(agentId, rebuttalContent, {
+        isMentioned: true,
+        isTargeted: true,
+      }),
+      (response: ChatMessage) => {
+        this.session.messages.push(response);
+        this.callbacks.onMessage?.(response);
+      },
+      {
+        onAgentThinking: (agentId, agentName) => this.callbacks.onAgentThinking?.(agentId, agentName),
+        onAgentDone: (agentId) => this.callbacks.onAgentDone?.(agentId),
+        onAgentError: (agentId, error) => this.callbacks.onAgentError?.(agentId, error),
+      }
+    );
+
+    return [...round1, ...round2];
+  }
 
   /**
    * Select which agents should respond when no @mention is present.

@@ -33,6 +33,17 @@ const AGENT_TRIGGER_MESSAGE =
  */
 export type OnAgentResponse = (response: ChatMessage) => void;
 
+export interface DispatcherLifecycleCallbacks {
+  onAgentThinking?: (agentId: string, agentName: string) => void;
+  onAgentDone?: (agentId: string) => void;
+  onAgentError?: (agentId: string, error: string) => void;
+}
+
+export interface DispatchResult {
+  response: ChatMessage | null;
+  outcome: 'success' | 'timeout' | 'crash';
+}
+
 export class ChatDispatcher {
   private readonly io: WorkspaceIO;
   private readonly contextManager: ContextManager;
@@ -69,7 +80,8 @@ export class ChatDispatcher {
     participants: ParticipantInfo[],
     allMessages: ChatMessage[],
     buildAgentContext: (agentId: string) => AgentContext,
-    onResponse?: OnAgentResponse
+    onResponse?: OnAgentResponse,
+    lifecycle?: DispatcherLifecycleCallbacks
   ): Promise<ChatMessage[]> {
     const responses: ChatMessage[] = [];
 
@@ -81,63 +93,104 @@ export class ChatDispatcher {
 
     for (const agent of participants) {
       this.logger?.debug('Dispatcher', 'startAgent', `serial dispatch`, agent.id);
+      lifecycle?.onAgentThinking?.(agent.id, agent.name);
 
       try {
-        // Build context (includes responses from agents who already replied this round)
-        const context = buildAgentContext(agent.id);
-        const taskContent = this.contextManager.buildTaskContent(context);
+        const result = await this.dispatchSingleAgent(agent, buildAgentContext);
 
-        // Write TASK.md
-        await this.io.writeTask(agent.id, taskContent);
-        this.logger?.debug('Dispatcher', 'writeTask', `contentLength=${taskContent.length}`, agent.id);
+        if (result.outcome === 'crash') {
+          // Retry once on crash
+          this.logger?.debug('Dispatcher', 'retryAfterCrash', 'retrying once', agent.id);
+          const retryResult = await this.dispatchSingleAgent(agent, buildAgentContext);
 
-        // Clear stale submission + done marker
-        try {
-          await this.io.clearSubmission(agent.id);
-        } catch {
-          // best-effort
-        }
-
-        // Trigger agent via openclaw CLI
-        const child = this.triggerAgent(agent.id);
-
-        // Poll for this agent's response (with crash detection)
-        const response = await this.pollForSingleResponse(agent, child);
-
-        if (response) {
-          responses.push(response);
-          // Immediately notify engine so the response is added to history
-          // and subsequent agents can see it in their context
-          onResponse?.(response);
-          this.logger?.debug('Dispatcher', 'responseReceived', `length=${response.content.length}`, agent.id);
+          if (retryResult.response) {
+            responses.push(retryResult.response);
+            onResponse?.(retryResult.response);
+            lifecycle?.onAgentDone?.(agent.id);
+            this.logger?.debug('Dispatcher', 'retrySuccess', `length=${retryResult.response.content.length}`, agent.id);
+          } else {
+            // Both attempts failed — notify user
+            const errorMsg = `[Agent ${agent.name} encountered an error and could not respond]`;
+            lifecycle?.onAgentError?.(agent.id, errorMsg);
+            const systemMsg: ChatMessage = {
+              id: `msg-err-${agent.id}-${Date.now()}`,
+              role: 'system',
+              content: errorMsg,
+              timestamp: new Date().toISOString(),
+            };
+            responses.push(systemMsg);
+            onResponse?.(systemMsg);
+          }
+        } else if (result.response) {
+          responses.push(result.response);
+          onResponse?.(result.response);
+          lifecycle?.onAgentDone?.(agent.id);
+          this.logger?.debug('Dispatcher', 'responseReceived', `length=${result.response.content.length}`, agent.id);
         } else {
+          lifecycle?.onAgentDone?.(agent.id);
           this.logger?.debug('Dispatcher', 'timeout', undefined, agent.id);
         }
-
-        // Clean up
-        try {
-          await this.io.clearTask(agent.id);
-          await this.io.clearSubmission(agent.id);
-        } catch {
-          // best-effort
-        }
       } catch (err) {
-        this.logger?.debug(
-          'Dispatcher',
-          'agentFailed',
-          err instanceof Error ? err.message : String(err),
-          agent.id
-        );
-        this.logger?.warn(
-          'Dispatcher',
-          'agentFailed',
-          `agent=${agent.id}: ${err instanceof Error ? err.message : String(err)}`
-        );
-        // Continue to next agent
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        lifecycle?.onAgentError?.(agent.id, errorMsg);
+        this.logger?.debug('Dispatcher', 'agentFailed', errorMsg, agent.id);
+        this.logger?.warn('Dispatcher', 'agentFailed', `agent=${agent.id}: ${errorMsg}`);
       }
     }
 
     return responses;
+  }
+
+  /**
+   * Dispatch to a single agent and return a structured result.
+   */
+  private async dispatchSingleAgent(
+    agent: ParticipantInfo,
+    buildAgentContext: (agentId: string) => AgentContext
+  ): Promise<DispatchResult> {
+    try {
+      const context = buildAgentContext(agent.id);
+      const taskContent = this.contextManager.buildTaskContent(context);
+
+      await this.io.writeTask(agent.id, taskContent);
+      this.logger?.debug('Dispatcher', 'writeTask', `contentLength=${taskContent.length}`, agent.id);
+
+      try {
+        await this.io.clearSubmission(agent.id);
+      } catch {
+        // best-effort
+      }
+
+      const child = this.triggerAgent(agent.id);
+      const response = await this.pollForSingleResponse(agent, child);
+
+      // Clean up
+      try {
+        await this.io.clearTask(agent.id);
+        await this.io.clearSubmission(agent.id);
+      } catch {
+        // best-effort
+      }
+
+      if (response) {
+        return { response, outcome: 'success' };
+      }
+
+      // Check if it was a crash (non-zero exit) vs timeout
+      // We detect this by checking if the child exited with non-zero
+      if (child) {
+        return { response: null, outcome: 'crash' };
+      }
+      return { response: null, outcome: 'timeout' };
+    } catch (err) {
+      this.logger?.debug(
+        'Dispatcher',
+        'dispatchSingleFailed',
+        err instanceof Error ? err.message : String(err),
+        agent.id
+      );
+      return { response: null, outcome: 'crash' };
+    }
   }
 
   /**

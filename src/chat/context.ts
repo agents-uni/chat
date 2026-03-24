@@ -116,8 +116,8 @@ export class ContextManager {
   }
 
   /**
-   * Generate a brief summary of older messages (outside the window).
-   * MVP: simple extraction of key points. Future: LLM summarization.
+   * Generate a structured summary of older messages (outside the window).
+   * Extracts topics, decisions, and disagreements.
    */
   summarizeOlderMessages(allMessages: ChatMessage[]): string | undefined {
     if (allMessages.length <= this.windowSize) {
@@ -127,7 +127,7 @@ export class ContextManager {
     const olderMessages = allMessages.slice(0, -this.windowSize);
     const count = olderMessages.length;
 
-    // MVP: count by sender + extract last few topics
+    // Count by sender
     const senderCounts = new Map<string, number>();
     for (const msg of olderMessages) {
       const sender = msg.role === 'user' ? 'User' : (msg.agentName ?? msg.agentId ?? 'unknown');
@@ -138,7 +138,70 @@ export class ContextManager {
       .map(([name, n]) => `${name}(${n})`)
       .join(', ');
 
-    return `[Earlier: ${count} messages from ${senderSummary}]`;
+    // Extract high-frequency keywords as topics
+    const wordFreq = new Map<string, number>();
+    const stopWords = new Set([
+      'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+      'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+      'should', 'may', 'might', 'can', 'shall', 'to', 'of', 'in', 'for',
+      'on', 'with', 'at', 'by', 'from', 'as', 'into', 'about', 'that',
+      'this', 'it', 'not', 'but', 'and', 'or', 'if', 'so', 'we', 'they',
+      'you', 'i', 'my', 'me', 'our', 'your', 'his', 'her', 'its',
+      '的', '了', '是', '在', '我', '有', '和', '就', '不', '人', '都',
+      '一', '这', '上', '也', '而', '对', '中', '他', '她', '们',
+    ]);
+
+    for (const msg of olderMessages) {
+      const words = msg.content.toLowerCase().split(/[\s,;.!?，；。！？]+/).filter(w => w.length > 2);
+      for (const word of words) {
+        if (!stopWords.has(word)) {
+          wordFreq.set(word, (wordFreq.get(word) ?? 0) + 1);
+        }
+      }
+    }
+
+    const topics = [...wordFreq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([word]) => word);
+
+    // Detect decisions
+    const decisionPatterns = /\b(agree|agreed|decided|decision|let's go with|approved|confirmed|同意|决定|通过|确认|就这样|采纳)\b/i;
+    const decisions: string[] = [];
+    for (const msg of olderMessages) {
+      if (decisionPatterns.test(msg.content)) {
+        const sender = msg.role === 'user' ? 'User' : (msg.agentName ?? msg.agentId ?? 'unknown');
+        decisions.push(`${sender}: ${msg.content.slice(0, 60)}...`);
+        if (decisions.length >= 3) break;
+      }
+    }
+
+    // Detect disagreements
+    const disagreementPatterns = /\b(disagree|however|but I think|on the contrary|不同意|但是|反对|不过我认为|我觉得不)\b/i;
+    const disagreements: string[] = [];
+    for (const msg of olderMessages) {
+      if (disagreementPatterns.test(msg.content)) {
+        const sender = msg.role === 'user' ? 'User' : (msg.agentName ?? msg.agentId ?? 'unknown');
+        disagreements.push(`${sender}: ${msg.content.slice(0, 60)}...`);
+        if (disagreements.length >= 3) break;
+      }
+    }
+
+    // Build structured summary
+    const parts: string[] = [];
+    parts.push(`[Earlier: ${count} messages from ${senderSummary}]`);
+
+    if (topics.length > 0) {
+      parts.push(`Topics: ${topics.join(', ')}`);
+    }
+    if (decisions.length > 0) {
+      parts.push(`Decisions: ${decisions.join(' | ')}`);
+    }
+    if (disagreements.length > 0) {
+      parts.push(`Disagreements: ${disagreements.join(' | ')}`);
+    }
+
+    return parts.join('\n');
   }
 
   /**

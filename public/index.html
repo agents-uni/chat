@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -34,13 +34,15 @@
           <div class="view-toggle">
             <button id="listViewBtn" class="toggle-btn active" onclick="setRelView('list')">List</button>
             <button id="graphViewBtn" class="toggle-btn" onclick="setRelView('graph')">Graph</button>
-            <button class="toggle-btn fullscreen-btn" onclick="openGraphModal()" title="全屏查看图谱">⛶</button>
+            <button id="timelineViewBtn" class="toggle-btn" onclick="setRelView('timeline')">Timeline</button>
+            <button class="toggle-btn fullscreen-btn" onclick="openGraphModal()" title="Fullscreen graph">⛶</button>
           </div>
         </div>
         <div id="relationshipList" class="relationship-list">
-          <div class="empty-state">开始对话后，Agent 之间的关系将在这里展示</div>
+          <div class="empty-state">Start a conversation to see agent relationships here</div>
         </div>
         <div id="relationshipGraph" class="relationship-graph" style="display:none;"></div>
+        <div id="relationshipTimeline" class="relationship-timeline" style="display:none;"></div>
       </div>
 
       <div class="sidebar-footer">
@@ -61,6 +63,24 @@
           </span>
         </div>
         <div class="chat-header-actions">
+          <!-- Mode selector -->
+          <select id="modeSelector" class="mode-selector" onchange="changeMode(this.value)">
+            <option value="sequential">Sequential</option>
+            <option value="debate">Debate</option>
+            <option value="brainstorm">Brainstorm</option>
+          </select>
+          <!-- Export button -->
+          <button class="header-btn" onclick="exportConversation()" title="Export conversation">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          </button>
+          <!-- Search button -->
+          <button class="header-btn" onclick="openSearchModal()" title="Search messages (Ctrl+K)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </button>
+          <!-- Theme toggle -->
+          <button class="header-btn" id="themeToggle" onclick="toggleTheme()" title="Toggle theme">
+            <span id="themeIcon">🌙</span>
+          </button>
           <span class="agent-count" id="agentCount">0 agents</span>
         </div>
       </header>
@@ -92,7 +112,7 @@
           </button>
         </div>
         <div class="input-hint" id="inputHint">
-          Press <kbd>Enter</kbd> to send, <kbd>Shift+Enter</kbd> for new line
+          Press <kbd>Enter</kbd> to send, <kbd>Shift+Enter</kbd> for new line · <kbd>Ctrl+K</kbd> search
         </div>
       </div>
     </main>
@@ -101,7 +121,7 @@
   <!-- Fullscreen Graph Modal -->
   <div id="graphModal" class="graph-modal">
     <div class="graph-modal-header">
-      <h3>关系图谱</h3>
+      <h3>Relationship Graph</h3>
       <button class="graph-modal-close" onclick="closeGraphModal()">&times;</button>
     </div>
     <div class="graph-modal-body">
@@ -109,6 +129,26 @@
       <div id="graphModalPanel" class="graph-modal-panel"></div>
     </div>
   </div>
+
+  <!-- Search Modal -->
+  <div id="searchModal" class="search-modal">
+    <div class="search-modal-content">
+      <div class="search-input-row">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="searchInput" class="search-input" placeholder="Search messages..." autocomplete="off">
+        <kbd class="search-kbd">ESC</kbd>
+      </div>
+      <div id="searchResults" class="search-results"></div>
+    </div>
+  </div>
+
+  <!-- Agent Detail Popover -->
+  <div id="agentPopover" class="agent-popover">
+    <div class="agent-popover-content" id="agentPopoverContent"></div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container"></div>
 
   <script src="https://unpkg.com/vis-network@9/standalone/umd/vis-network.min.js"></script>
   <script src="/script.js"></script>

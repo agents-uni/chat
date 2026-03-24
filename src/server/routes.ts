@@ -29,6 +29,15 @@ export function createRoutes(engine: ChatEngine): Hono {
     onRelationshipChange: (changes) => {
       broadcast({ type: 'relationship_update', changes });
     },
+    onAgentThinking: (agentId, agentName) => {
+      broadcast({ type: 'agent_thinking', agentId, agentName });
+    },
+    onAgentDone: (agentId) => {
+      broadcast({ type: 'agent_done', agentId });
+    },
+    onAgentError: (agentId, error) => {
+      broadcast({ type: 'agent_error', agentId, error });
+    },
   });
 
   // Register debug log callback for SSE push
@@ -222,6 +231,86 @@ export function createRoutes(engine: ChatEngine): Hono {
       console.error('[ChatServer] Error updating relation:', err);
       return c.json({ error: message }, 500);
     }
+  });
+
+  /**
+   * GET /api/messages — Paginated messages
+   */
+  app.get('/messages', (c) => {
+    const page = parseInt(c.req.query('page') ?? '1', 10);
+    const limit = parseInt(c.req.query('limit') ?? '20', 10);
+    const session = engine.getSession();
+    const total = session.messages.length;
+    const start = Math.max(0, total - page * limit);
+    const end = Math.max(0, total - (page - 1) * limit);
+    const messages = session.messages.slice(start, end);
+
+    return c.json({
+      messages,
+      page,
+      total,
+      hasMore: start > 0,
+    });
+  });
+
+  /**
+   * GET /api/export — Export conversation
+   */
+  app.get('/export', (c) => {
+    const format = c.req.query('format') ?? 'json';
+    const session = engine.getSession();
+
+    if (format === 'markdown') {
+      const lines: string[] = [];
+      lines.push(`# ${session.universeId} — Group Chat Export`);
+      lines.push(`\nExported: ${new Date().toISOString()}\n`);
+      lines.push(`## Participants\n`);
+      for (const p of session.participants) {
+        lines.push(`- **${p.name}** — ${p.role}${p.department ? ` [${p.department}]` : ''}`);
+      }
+      lines.push(`\n## Messages\n`);
+      for (const msg of session.messages) {
+        const sender = msg.role === 'user' ? 'User' : (msg.agentName ?? msg.agentId ?? 'System');
+        const time = new Date(msg.timestamp).toLocaleTimeString('en-US', { hour12: false });
+        lines.push(`**${sender}** (${time}):\n${msg.content}\n`);
+      }
+      const markdown = lines.join('\n');
+      return new Response(markdown, {
+        headers: {
+          'Content-Type': 'text/markdown; charset=utf-8',
+          'Content-Disposition': `attachment; filename="chat-export-${Date.now()}.md"`,
+        },
+      });
+    }
+
+    // JSON format
+    return c.json({
+      exported: new Date().toISOString(),
+      universe: session.universeId,
+      participants: session.participants,
+      messages: session.messages,
+    });
+  });
+
+  /**
+   * GET /api/mode — Get current conversation mode
+   */
+  app.get('/mode', (c) => {
+    return c.json({ mode: engine.getMode() });
+  });
+
+  /**
+   * POST /api/mode — Set conversation mode
+   */
+  app.post('/mode', async (c) => {
+    const body = await c.req.json<{ mode: string }>();
+    const validModes = ['sequential', 'debate', 'brainstorm'];
+    if (!body.mode || !validModes.includes(body.mode)) {
+      return c.json({ error: `mode must be one of: ${validModes.join(', ')}` }, 400);
+    }
+    engine.setMode(body.mode as 'sequential' | 'debate' | 'brainstorm');
+    broadcast({ type: 'mode_change', mode: body.mode });
+    return c.json({ mode: engine.getMode() });
   });
 
   /**

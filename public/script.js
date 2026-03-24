@@ -2,7 +2,8 @@
  * Agents Uni Chat — Frontend Script
  *
  * SSE-based real-time communication with the chat server.
- * Sequential message model: input is disabled while agents are processing.
+ * Features: theme toggle, agent thinking indicators, search, export,
+ * agent popover, toast notifications, timeline, mode selector.
  */
 
 // ─── State ──────────────────────────────────────
@@ -12,6 +13,7 @@ let isProcessing = false;
 let eventSource = null;
 let agents = []; // { id, name, role } — for @mention autocomplete
 let isComposing = false; // IME composition guard
+let thinkingAgents = new Map(); // agentId → agentName
 
 // Agent colors (rotate through these)
 const AGENT_COLORS = [
@@ -45,6 +47,11 @@ const inputHint = document.getElementById('inputHint');
 // ─── Initialize ─────────────────────────────────
 
 async function init() {
+  // Restore theme
+  const savedTheme = localStorage.getItem('agents-chat-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', savedTheme);
+  updateThemeIcon(savedTheme);
+
   // Load initial config
   try {
     const configRes = await fetch('/api/config');
@@ -61,6 +68,15 @@ async function init() {
     console.error('Failed to load config:', err);
   }
 
+  // Load current mode
+  try {
+    const modeRes = await fetch('/api/mode');
+    const modeData = await modeRes.json();
+    document.getElementById('modeSelector').value = modeData.mode;
+  } catch {
+    // default
+  }
+
   // Connect SSE
   connectSSE();
 
@@ -69,6 +85,36 @@ async function init() {
 
   // Load initial relationships
   loadRelationships();
+}
+
+// ─── Theme Toggle ───────────────────────────────
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('agents-chat-theme', next);
+  updateThemeIcon(next);
+}
+
+function updateThemeIcon(theme) {
+  const icon = document.getElementById('themeIcon');
+  if (icon) icon.textContent = theme === 'dark' ? '🌙' : '☀️';
+}
+
+// ─── Mode Selector ──────────────────────────────
+
+async function changeMode(mode) {
+  try {
+    await fetch('/api/mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    showToast(`Mode changed to ${mode}`, 'info');
+  } catch {
+    showToast('Failed to change mode', 'error');
+  }
 }
 
 // ─── SSE Connection ─────────────────────────────
@@ -106,39 +152,90 @@ function handleServerEvent(data) {
 
     case 'status_change':
       setProcessingState(data.status === 'processing');
+      if (data.status === 'idle') {
+        thinkingAgents.clear();
+        removeThinkingIndicators();
+      }
+      break;
+
+    case 'agent_thinking':
+      thinkingAgents.set(data.agentId, data.agentName);
+      updateThinkingIndicators();
+      break;
+
+    case 'agent_done':
+      thinkingAgents.delete(data.agentId);
+      updateThinkingIndicators();
+      break;
+
+    case 'agent_error':
+      thinkingAgents.delete(data.agentId);
+      updateThinkingIndicators();
+      showToast(`Agent error: ${data.error}`, 'error');
       break;
 
     case 'relationship_update':
       loadRelationships();
-      // Show lightweight notification in chat
       if (data.changes && data.changes.length > 0) {
         const changeDesc = data.changes.map(c => {
           const eventMap = {
-            'chat.agreement': '达成共识',
-            'chat.disagreement': '产生分歧',
-            'chat.trust': '信任增加',
-            'chat.distrust': '信任降低',
-            'chat.support': '表示支持',
-            'chat.oppose': '表示反对',
+            'chat.agreement': 'consensus',
+            'chat.disagreement': 'disagreement',
+            'chat.collaboration': 'collaboration',
           };
           const label = eventMap[c.eventType] || c.eventType;
-          return `${c.from} → ${c.to}：${label}`;
-        }).join('；');
-        appendMessage({
-          id: `rel-${Date.now()}`,
-          role: 'system',
-          content: `关系变化：${changeDesc}`,
-          timestamp: new Date().toISOString(),
-        });
+          return `${c.from} → ${c.to}: ${label}`;
+        }).join('; ');
+        showToast(`Relationship: ${changeDesc}`, 'info', 4000);
       }
       break;
+
+    case 'mode_change':
+      document.getElementById('modeSelector').value = data.mode;
+      showToast(`Mode: ${data.mode}`, 'info');
+      break;
   }
+}
+
+// ─── Thinking Indicators ────────────────────────
+
+function updateThinkingIndicators() {
+  removeThinkingIndicators();
+
+  if (thinkingAgents.size === 0) return;
+
+  const container = document.createElement('div');
+  container.className = 'thinking-agents';
+  container.id = 'thinkingIndicator';
+
+  for (const [agentId, agentName] of thinkingAgents) {
+    const color = getAgentColor(agentId);
+    const initial = agentName.charAt(0).toUpperCase();
+    const item = document.createElement('div');
+    item.className = 'thinking-agent';
+    item.innerHTML = `
+      <div class="thinking-agent-avatar" style="background: ${color}">${initial}</div>
+      <span>${escapeHtml(agentName)} is thinking</span>
+      <div class="typing-dots"><span></span><span></span><span></span></div>
+    `;
+    container.appendChild(item);
+  }
+
+  messagesContainer.appendChild(container);
+  scrollToBottom();
+}
+
+function removeThinkingIndicators() {
+  const el = document.getElementById('thinkingIndicator');
+  if (el) el.remove();
+  // Also remove legacy processing indicators
+  const legacy = messagesContainer.querySelector('.processing-indicator');
+  if (legacy) legacy.remove();
 }
 
 // ─── Input Handling ─────────────────────────────
 
 function setupInputHandlers() {
-  // Auto-resize textarea
   messageInput.addEventListener('input', () => {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 120) + 'px';
@@ -146,36 +243,19 @@ function setupInputHandlers() {
     updateSendButtonState();
   });
 
-  // IME composition guards (prevents Enter from sending during CJK input)
   messageInput.addEventListener('compositionstart', () => { isComposing = true; });
   messageInput.addEventListener('compositionend', () => { isComposing = false; });
 
-  // Keyboard navigation
   messageInput.addEventListener('keydown', (e) => {
-    // If mention dropdown is open, handle navigation
+    // Mention dropdown navigation
     if (mentionDropdown && mentionDropdown.style.display !== 'none') {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        moveMentionSelection(1);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        moveMentionSelection(-1);
-        return;
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault();
-        confirmMentionSelection();
-        return;
-      }
-      if (e.key === 'Escape') {
-        hideMentionDropdown();
-        return;
-      }
+      if (e.key === 'ArrowDown') { e.preventDefault(); moveMentionSelection(1); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); moveMentionSelection(-1); return; }
+      if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); confirmMentionSelection(); return; }
+      if (e.key === 'Escape') { hideMentionDropdown(); return; }
     }
 
-    // Normal Enter to send — skip if IME is composing
+    // Normal Enter to send
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isComposing) {
       e.preventDefault();
       sendMessage();
@@ -183,18 +263,27 @@ function setupInputHandlers() {
   });
 
   sendButton.addEventListener('click', sendMessage);
-
-  // Initialize send button state
   updateSendButtonState();
 
-  // Click outside to close dropdown
   document.addEventListener('click', (e) => {
     if (mentionDropdown && !mentionDropdown.contains(e.target) && e.target !== messageInput) {
       hideMentionDropdown();
     }
+    // Close popover on outside click
+    const popover = document.getElementById('agentPopover');
+    if (popover.classList.contains('open') && !popover.contains(e.target) && !e.target.closest('.message-avatar') && !e.target.closest('.participant-item')) {
+      closeAgentPopover();
+    }
   });
 
-  // Create mention dropdown element
+  // Ctrl+K for search
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+      e.preventDefault();
+      openSearchModal();
+    }
+  });
+
   createMentionDropdown();
 }
 
@@ -215,32 +304,20 @@ function createMentionDropdown() {
 function handleMentionInput() {
   const value = messageInput.value;
   const cursorPos = messageInput.selectionStart;
-
-  // Find the @ before cursor
   const textBeforeCursor = value.substring(0, cursorPos);
   const atMatch = textBeforeCursor.match(/@(\S*)$/);
 
-  if (!atMatch) {
-    hideMentionDropdown();
-    return;
-  }
+  if (!atMatch) { hideMentionDropdown(); return; }
 
   mentionStartPos = cursorPos - atMatch[0].length;
   const query = atMatch[1].toLowerCase();
 
-  // Filter agents by query
   mentionFilteredAgents = [
     { id: '_all', name: 'all', role: 'Everyone' },
     ...agents,
-  ].filter(a =>
-    a.id.toLowerCase().includes(query) ||
-    a.name.toLowerCase().includes(query)
-  );
+  ].filter(a => a.id.toLowerCase().includes(query) || a.name.toLowerCase().includes(query));
 
-  if (mentionFilteredAgents.length === 0) {
-    hideMentionDropdown();
-    return;
-  }
+  if (mentionFilteredAgents.length === 0) { hideMentionDropdown(); return; }
 
   mentionSelectedIndex = 0;
   renderMentionDropdown();
@@ -253,28 +330,15 @@ function renderMentionDropdown() {
   mentionFilteredAgents.forEach((agent, index) => {
     const item = document.createElement('div');
     item.className = 'mention-item' + (index === mentionSelectedIndex ? ' selected' : '');
-
     const color = agent.id === '_all' ? '#fbbf24' : getAgentColor(agent.id);
     const initial = agent.name.charAt(0).toUpperCase();
-
     item.innerHTML = `
       <span class="mention-avatar" style="background: ${color}">${initial}</span>
       <span class="mention-name">${escapeHtml(agent.name)}</span>
       <span class="mention-role">${escapeHtml(agent.role)}</span>
     `;
-
-    item.addEventListener('mouseenter', () => {
-      mentionSelectedIndex = index;
-      renderMentionDropdown();
-    });
-
-    item.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      mentionSelectedIndex = index;
-      confirmMentionSelection();
-    });
-
+    item.addEventListener('mouseenter', () => { mentionSelectedIndex = index; renderMentionDropdown(); });
+    item.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); mentionSelectedIndex = index; confirmMentionSelection(); });
     mentionDropdown.appendChild(item);
   });
 }
@@ -286,31 +350,22 @@ function moveMentionSelection(delta) {
 
 function confirmMentionSelection() {
   if (mentionFilteredAgents.length === 0) return;
-
   const agent = mentionFilteredAgents[mentionSelectedIndex];
   const value = messageInput.value;
   const cursorPos = messageInput.selectionStart;
-
-  // Replace @query with @name
   const before = value.substring(0, mentionStartPos);
   const after = value.substring(cursorPos);
   const mentionText = agent.id === '_all' ? '@all ' : `@${agent.name} `;
-
   messageInput.value = before + mentionText + after;
-
-  // Move cursor after the mention
   const newPos = mentionStartPos + mentionText.length;
   messageInput.selectionStart = newPos;
   messageInput.selectionEnd = newPos;
-
   hideMentionDropdown();
   messageInput.focus();
 }
 
 function hideMentionDropdown() {
-  if (mentionDropdown) {
-    mentionDropdown.style.display = 'none';
-  }
+  if (mentionDropdown) mentionDropdown.style.display = 'none';
   mentionStartPos = -1;
   mentionFilteredAgents = [];
 }
@@ -319,15 +374,12 @@ async function sendMessage() {
   const content = messageInput.value.trim();
   if (!content || isProcessing) return;
 
-  // Clear input immediately
   messageInput.value = '';
   messageInput.style.height = 'auto';
   updateSendButtonState();
 
-  // Send via HTTP (SSE will broadcast the messages)
   try {
     setProcessingState(true);
-
     const res = await fetch('/api/message', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -336,31 +388,24 @@ async function sendMessage() {
 
     if (!res.ok) {
       const error = await res.json();
-      showError(error.error || 'Failed to send message');
+      showToast(error.error || 'Failed to send message', 'error');
       setProcessingState(false);
     }
-    // Success: SSE will handle status_change back to idle
-  } catch (err) {
-    showError('Network error. Please check your connection.');
+  } catch {
+    showToast('Network error. Please check your connection.', 'error');
     setProcessingState(false);
   }
 }
 
 // ─── Rendering ──────────────────────────────────
 
-function renderParticipants(agents) {
+function renderParticipants(agentsList) {
   participantList.innerHTML = '';
 
-  // Add user first
-  const userItem = createParticipantItem({
-    id: 'user',
-    name: 'You',
-    role: 'Ruler',
-  }, '#7c5cfc');
+  const userItem = createParticipantItem({ id: 'user', name: 'You', role: 'Ruler' }, '#7c5cfc');
   participantList.appendChild(userItem);
 
-  // Add agents
-  for (const agent of agents) {
+  for (const agent of agentsList) {
     const color = getAgentColor(agent.id);
     const item = createParticipantItem(agent, color);
     participantList.appendChild(item);
@@ -373,7 +418,13 @@ function createParticipantItem(agent, color) {
   if (agent.id !== 'user') {
     div.title = `Click to @${agent.name}`;
     div.style.cursor = 'pointer';
-    div.addEventListener('click', () => insertMention(agent.name));
+    div.addEventListener('click', (e) => {
+      if (e.shiftKey || e.ctrlKey || e.metaKey) {
+        showAgentPopover(agent.id, e.currentTarget);
+      } else {
+        insertMention(agent.name);
+      }
+    });
   }
   div.innerHTML = `
     <div class="participant-avatar" style="background: ${color}">
@@ -387,64 +438,46 @@ function createParticipantItem(agent, color) {
   return div;
 }
 
+let msgCounter = 0;
+
 function renderExistingMessages(messages) {
   if (!messages || messages.length === 0) return;
-
-  // Clear welcome message
   const welcome = messagesContainer.querySelector('.welcome-message');
   if (welcome) welcome.remove();
-
-  // Render all messages
   for (const msg of messages) {
     appendMessage(msg, false);
   }
 }
 
 function appendMessage(msg, animate = true) {
-  // Remove welcome message if present
   const welcome = messagesContainer.querySelector('.welcome-message');
   if (welcome) welcome.remove();
 
-  // Remove processing indicator if agent message
   if (msg.role === 'agent') {
-    removeProcessingIndicator();
+    removeThinkingIndicators();
   }
 
   const div = document.createElement('div');
   div.className = `message ${msg.role}`;
+  div.setAttribute('data-msg-id', msg.id);
   if (!animate) div.style.animation = 'none';
 
-  const avatarColor = msg.role === 'user'
-    ? '#7c5cfc'
-    : getAgentColor(msg.agentId || 'system');
-
-  const senderName = msg.role === 'user'
-    ? 'You'
-    : (msg.agentName || msg.agentId || 'System');
-
+  const avatarColor = msg.role === 'user' ? '#7c5cfc' : getAgentColor(msg.agentId || 'system');
+  const senderName = msg.role === 'user' ? 'You' : (msg.agentName || msg.agentId || 'System');
   const avatarChar = senderName.charAt(0).toUpperCase();
-  const time = new Date(msg.timestamp).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  });
+  const time = new Date(msg.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 
-  // Render content: Markdown for agent messages, plain escape for others
   const escapedContent = escapeHtml(msg.content);
-  const renderedContent = msg.role === 'agent'
-    ? renderMarkdown(escapedContent)
-    : highlightMentions(escapedContent);
+  const renderedContent = msg.role === 'agent' ? renderMarkdown(escapedContent) : highlightMentions(escapedContent);
 
   if (msg.role === 'system') {
-    // Compact pill style for system messages
-    div.innerHTML = `
-      <div class="message-body">
-        <div class="message-content">${renderedContent}</div>
-      </div>
-    `;
+    div.innerHTML = `<div class="message-body"><div class="message-content">${renderedContent}</div></div>`;
   } else {
+    const avatarOnClick = msg.role === 'agent' && msg.agentId
+      ? `onclick="showAgentPopover('${escapeHtml(msg.agentId)}', this)"`
+      : '';
     div.innerHTML = `
-      <div class="message-avatar" style="background: ${avatarColor}">${avatarChar}</div>
+      <div class="message-avatar" style="background: ${avatarColor}" ${avatarOnClick}>${avatarChar}</div>
       <div class="message-body">
         <div class="message-sender">${escapeHtml(senderName)}</div>
         <div class="message-content">${renderedContent}</div>
@@ -457,30 +490,8 @@ function appendMessage(msg, animate = true) {
   scrollToBottom();
 }
 
-function showProcessingIndicator() {
-  // Don't duplicate
-  if (messagesContainer.querySelector('.processing-indicator')) return;
-
-  const div = document.createElement('div');
-  div.className = 'processing-indicator';
-  div.innerHTML = `
-    <div class="typing-dots">
-      <span></span><span></span><span></span>
-    </div>
-    <span>Agents are thinking...</span>
-  `;
-  messagesContainer.appendChild(div);
-  scrollToBottom();
-}
-
-function removeProcessingIndicator() {
-  const indicator = messagesContainer.querySelector('.processing-indicator');
-  if (indicator) indicator.remove();
-}
-
 function setProcessingState(processing) {
   isProcessing = processing;
-
   const statusDot = chatStatus.querySelector('.status-dot');
   const statusText = chatStatus.querySelector('.status-text');
 
@@ -491,32 +502,212 @@ function setProcessingState(processing) {
     sendButton.disabled = true;
     messageInput.placeholder = 'Waiting for agents...';
     inputHint.textContent = 'Agents are generating responses...';
-    showProcessingIndicator();
   } else {
     statusDot.className = 'status-dot idle';
     statusText.textContent = 'Ready';
     messageInput.disabled = false;
     sendButton.disabled = false;
     messageInput.placeholder = 'Type your message...';
-    inputHint.innerHTML = 'Press <kbd>Enter</kbd> to send, <kbd>Shift+Enter</kbd> for new line';
-    removeProcessingIndicator();
+    inputHint.innerHTML = 'Press <kbd>Enter</kbd> to send, <kbd>Shift+Enter</kbd> for new line · <kbd>Ctrl+K</kbd> search';
+    removeThinkingIndicators();
     messageInput.focus();
   }
 }
 
-function showError(message) {
-  const msg = {
-    id: `err-${Date.now()}`,
-    role: 'system',
-    content: `Error: ${message}`,
-    timestamp: new Date().toISOString(),
-  };
-  appendMessage(msg);
+// ─── Toast Notifications ────────────────────────
+
+const toastQueue = [];
+const MAX_TOASTS = 3;
+
+function showToast(message, type = 'info', duration = 3000) {
+  const container = document.getElementById('toastContainer');
+  const icons = { info: 'ℹ️', success: '✓', warning: '⚠️', error: '✕' };
+
+  // Limit toasts
+  while (container.children.length >= MAX_TOASTS) {
+    container.removeChild(container.firstChild);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type] || icons.info}</span><span>${escapeHtml(message)}</span>`;
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.classList.add('removing');
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+// ─── Search Modal ───────────────────────────────
+
+function openSearchModal() {
+  const modal = document.getElementById('searchModal');
+  modal.classList.add('open');
+  const input = document.getElementById('searchInput');
+  input.value = '';
+  input.focus();
+  document.getElementById('searchResults').innerHTML = '<div class="search-empty">Type to search messages...</div>';
+
+  input.addEventListener('input', debounce(handleSearchInput, 200));
+}
+
+function closeSearchModal() {
+  document.getElementById('searchModal').classList.remove('open');
+}
+
+function handleSearchInput() {
+  const query = document.getElementById('searchInput').value.trim().toLowerCase();
+  const resultsDiv = document.getElementById('searchResults');
+
+  if (!query) {
+    resultsDiv.innerHTML = '<div class="search-empty">Type to search messages...</div>';
+    return;
+  }
+
+  const allMessages = session?.messages || [];
+  const matches = allMessages.filter(m => m.content.toLowerCase().includes(query));
+
+  if (matches.length === 0) {
+    resultsDiv.innerHTML = '<div class="search-empty">No results found</div>';
+    return;
+  }
+
+  resultsDiv.innerHTML = '';
+  for (const msg of matches.slice(0, 30)) {
+    const sender = msg.role === 'user' ? 'You' : (msg.agentName || msg.agentId || 'System');
+    const highlighted = escapeHtml(msg.content).replace(
+      new RegExp(`(${escapeRegExp(query)})`, 'gi'),
+      '<mark>$1</mark>'
+    );
+
+    const item = document.createElement('div');
+    item.className = 'search-result-item';
+    item.innerHTML = `
+      <div class="search-result-sender">${escapeHtml(sender)}</div>
+      <div class="search-result-content">${highlighted.slice(0, 200)}${msg.content.length > 200 ? '...' : ''}</div>
+    `;
+    item.addEventListener('click', () => {
+      closeSearchModal();
+      const msgEl = messagesContainer.querySelector(`[data-msg-id="${msg.id}"]`);
+      if (msgEl) {
+        msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        msgEl.style.outline = '2px solid var(--accent)';
+        setTimeout(() => { msgEl.style.outline = ''; }, 2000);
+      }
+    });
+    resultsDiv.appendChild(item);
+  }
+}
+
+// ESC/click outside to close search
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (document.getElementById('searchModal').classList.contains('open')) {
+      closeSearchModal();
+      return;
+    }
+    if (document.getElementById('graphModal').classList.contains('open')) {
+      closeGraphModal();
+      return;
+    }
+    closeAgentPopover();
+  }
+});
+
+document.getElementById('searchModal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeSearchModal();
+});
+
+// ─── Export ─────────────────────────────────────
+
+async function exportConversation() {
+  try {
+    const res = await fetch('/api/export?format=markdown');
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `chat-export-${Date.now()}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Conversation exported', 'success');
+  } catch {
+    showToast('Export failed', 'error');
+  }
+}
+
+// ─── Agent Detail Popover ───────────────────────
+
+function showAgentPopover(agentId, triggerEl) {
+  const agent = agents.find(a => a.id === agentId);
+  if (!agent) return;
+
+  const popover = document.getElementById('agentPopover');
+  const content = document.getElementById('agentPopoverContent');
+  const color = getAgentColor(agentId);
+
+  // Build traits display
+  const traits = agent.traits || {};
+  const traitsHtml = Object.entries(traits).length > 0
+    ? Object.entries(traits).map(([k, v]) => `<span class="popover-trait">${escapeHtml(k)}: ${(v * 100).toFixed(0)}%</span>`).join('')
+    : '<span class="popover-trait">No traits defined</span>';
+
+  // Build relationship info
+  let relsHtml = '';
+  if (lastVizData && lastVizData.edges) {
+    const relEdges = lastVizData.edges.filter(e => e.from === agentId || e.to === agentId);
+    if (relEdges.length > 0) {
+      relsHtml = relEdges.slice(0, 5).map(e => {
+        const otherId = e.from === agentId ? e.to : e.from;
+        const dims = (e.dimensions || []).filter(d => Math.abs(d.value) > 0.1)
+          .map(d => `${d.type}: ${d.value > 0 ? '+' : ''}${d.value.toFixed(1)}`).join(', ');
+        return `<div class="popover-rel-item">${escapeHtml(otherId)}: ${dims || 'neutral'}</div>`;
+      }).join('');
+    }
+  }
+
+  content.innerHTML = `
+    <div class="popover-header">
+      <div class="popover-avatar" style="background: ${color}">${agent.name.charAt(0).toUpperCase()}</div>
+      <div>
+        <div class="popover-name">${escapeHtml(agent.name)}</div>
+        <div class="popover-role">${escapeHtml(agent.role)}${agent.department ? ` · ${escapeHtml(agent.department)}` : ''}</div>
+      </div>
+    </div>
+    <div class="popover-section">
+      <div class="popover-section-title">Traits</div>
+      <div class="popover-traits">${traitsHtml}</div>
+    </div>
+    ${relsHtml ? `<div class="popover-section"><div class="popover-section-title">Relationships</div>${relsHtml}</div>` : ''}
+  `;
+
+  // Position
+  const rect = triggerEl.getBoundingClientRect();
+  const isMobile = window.innerWidth <= 768;
+
+  if (isMobile) {
+    popover.style.left = '0';
+    popover.style.right = '0';
+    popover.style.bottom = '0';
+    popover.style.top = 'auto';
+  } else {
+    popover.style.left = (rect.left + rect.width + 8) + 'px';
+    popover.style.top = rect.top + 'px';
+    popover.style.right = 'auto';
+    popover.style.bottom = 'auto';
+  }
+
+  popover.classList.add('open');
+}
+
+function closeAgentPopover() {
+  document.getElementById('agentPopover').classList.remove('open');
 }
 
 // ─── Relationships ──────────────────────────────
 
-let relViewMode = 'list'; // 'list' or 'graph'
+let relViewMode = 'list';
 let relNetwork = null;
 let lastVizData = null;
 
@@ -528,8 +719,10 @@ async function loadRelationships() {
 
     if (relViewMode === 'list') {
       renderRelationships(vizData);
-    } else {
+    } else if (relViewMode === 'graph') {
       renderRelationshipGraph(vizData);
+    } else if (relViewMode === 'timeline') {
+      loadTimeline();
     }
   } catch {
     // Silently fail
@@ -540,44 +733,68 @@ function setRelView(mode) {
   relViewMode = mode;
   document.getElementById('listViewBtn').classList.toggle('active', mode === 'list');
   document.getElementById('graphViewBtn').classList.toggle('active', mode === 'graph');
+  document.getElementById('timelineViewBtn').classList.toggle('active', mode === 'timeline');
   document.getElementById('relationshipList').style.display = mode === 'list' ? '' : 'none';
   document.getElementById('relationshipGraph').style.display = mode === 'graph' ? '' : 'none';
+  document.getElementById('relationshipTimeline').style.display = mode === 'timeline' ? '' : 'none';
 
-  if (lastVizData) {
-    if (mode === 'list') {
-      renderRelationships(lastVizData);
-    } else {
-      renderRelationshipGraph(lastVizData);
+  if (mode === 'timeline') {
+    loadTimeline();
+  } else if (lastVizData) {
+    if (mode === 'list') renderRelationships(lastVizData);
+    else renderRelationshipGraph(lastVizData);
+  }
+}
+
+// ─── Timeline ───────────────────────────────────
+
+async function loadTimeline() {
+  const container = document.getElementById('relationshipTimeline');
+  try {
+    const res = await fetch('/api/relations/timeline');
+    const events = await res.json();
+
+    if (!events || events.length === 0) {
+      container.innerHTML = '<div class="empty-state">No relationship events yet</div>';
+      return;
     }
+
+    container.innerHTML = '';
+    for (const evt of events.slice(0, 30)) {
+      const dotClass = evt.type.includes('agreement') || evt.type.includes('consensus') ? 'consensus'
+        : evt.type.includes('disagree') ? 'disagreement'
+        : evt.type.includes('collab') ? 'collaboration' : 'default';
+
+      const time = new Date(evt.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+      const div = document.createElement('div');
+      div.className = 'timeline-event';
+      div.innerHTML = `
+        <div class="timeline-dot ${dotClass}"></div>
+        <div class="timeline-info">
+          <div class="timeline-desc">${escapeHtml(evt.from)} → ${escapeHtml(evt.to)}: ${escapeHtml(evt.type.replace('chat.', ''))}</div>
+          ${evt.description ? `<div class="timeline-meta">${escapeHtml(evt.description.slice(0, 80))}</div>` : ''}
+          <div class="timeline-meta">${time}</div>
+        </div>
+      `;
+      container.appendChild(div);
+    }
+  } catch {
+    container.innerHTML = '<div class="empty-state">Failed to load timeline</div>';
   }
 }
 
 function renderRelationshipGraph(vizData) {
   const container = document.getElementById('relationshipGraph');
   if (!container || typeof vis === 'undefined') return;
-
-  if (relNetwork) {
-    relNetwork.destroy();
-  }
-
+  if (relNetwork) relNetwork.destroy();
   const { nodes, edges, options } = createGraphConfig(vizData);
   relNetwork = new vis.Network(container, { nodes, edges }, options);
 }
 
-/**
- * Build vis.js nodes, edges, and options from vizData.
- * Shared between sidebar graph and fullscreen modal.
- */
 function createGraphConfig(vizData) {
-  const CLUSTER_COLORS = [
-    '#7c5cfc', '#f472b6', '#34d399', '#fbbf24',
-    '#60a5fa', '#c084fc', '#fb923c', '#2dd4bf',
-  ];
-
+  const CLUSTER_COLORS = ['#7c5cfc', '#f472b6', '#34d399', '#fbbf24', '#60a5fa', '#c084fc', '#fb923c', '#2dd4bf'];
   const clusterColorMap = {};
-  (vizData.clusters || []).forEach((c, i) => {
-    clusterColorMap[c.id] = CLUSTER_COLORS[i % CLUSTER_COLORS.length];
-  });
+  (vizData.clusters || []).forEach((c, i) => { clusterColorMap[c.id] = CLUSTER_COLORS[i % CLUSTER_COLORS.length]; });
 
   const nodeValence = {};
   (vizData.edges || []).forEach(e => {
@@ -587,31 +804,17 @@ function createGraphConfig(vizData) {
     });
   });
 
-  // Build agent metadata lookup for tooltips
-  const agentMeta = {};
-  (vizData.nodes || []).forEach(n => {
-    agentMeta[n.id] = n;
-  });
-
   const nodes = new vis.DataSet((vizData.nodes || []).map(n => {
     const baseColor = clusterColorMap[n.clusterId] || '#64748b';
     const vals = nodeValence[n.id] || [0];
     const avgValence = vals.reduce((a, b) => a + b, 0) / vals.length;
     const glowColor = avgValence > 0.1 ? 'rgba(74,222,128,0.4)' : avgValence < -0.1 ? 'rgba(248,113,113,0.4)' : 'rgba(100,116,139,0.3)';
-
     return {
-      id: n.id,
-      label: n.label || n.id,
+      id: n.id, label: n.label || n.id,
       title: n.role ? `${n.label || n.id}\n${n.role}` : (n.label || n.id),
       size: 12 + n.influence * 22,
-      color: {
-        background: baseColor,
-        border: glowColor,
-        highlight: { background: '#c084fc', border: '#7c3aed' },
-        hover: { background: baseColor, border: '#fff' },
-      },
-      borderWidth: 3,
-      borderWidthSelected: 4,
+      color: { background: baseColor, border: glowColor, highlight: { background: '#c084fc', border: '#7c3aed' }, hover: { background: baseColor, border: '#fff' } },
+      borderWidth: 3, borderWidthSelected: 4,
       font: { color: '#e0e0e8', size: 12, strokeWidth: 3, strokeColor: '#0a0a0f' },
       shadow: { enabled: true, color: glowColor, size: 10, x: 0, y: 0 },
     };
@@ -619,55 +822,25 @@ function createGraphConfig(vizData) {
 
   function valenceToColor(v) {
     const clamped = Math.max(-1, Math.min(1, v));
-    if (clamped >= 0) {
-      const t = clamped;
-      const r = Math.round(100 + (74 - 100) * t);
-      const g = Math.round(116 + (222 - 116) * t);
-      const b = Math.round(139 + (128 - 139) * t);
-      return `rgb(${r},${g},${b})`;
-    }
-    const t = -clamped;
-    const r = Math.round(100 + (248 - 100) * t);
-    const g = Math.round(116 + (113 - 116) * t);
-    const b = Math.round(139 + (113 - 139) * t);
-    return `rgb(${r},${g},${b})`;
+    if (clamped >= 0) { const t = clamped; return `rgb(${Math.round(100+(74-100)*t)},${Math.round(116+(222-116)*t)},${Math.round(139+(128-139)*t)})`; }
+    const t = -clamped; return `rgb(${Math.round(100+(248-100)*t)},${Math.round(116+(113-116)*t)},${Math.round(139+(113-139)*t)})`;
   }
 
   const edges = new vis.DataSet((vizData.edges || []).map(e => {
-    const dimTooltip = (e.dimensions || [])
-      .map(d => `${d.type}: ${d.value >= 0 ? '+' : ''}${d.value.toFixed(2)}`)
-      .join('\n');
+    const dimTooltip = (e.dimensions || []).map(d => `${d.type}: ${d.value >= 0 ? '+' : ''}${d.value.toFixed(2)}`).join('\n');
     return {
-      id: e.id,
-      from: e.from,
-      to: e.to,
-      width: 1 + e.strength * 4,
+      id: e.id, from: e.from, to: e.to, width: 1 + e.strength * 4,
       title: `${e.from} → ${e.to}\n${dimTooltip}`,
-      color: {
-        color: valenceToColor(e.valence || 0),
-        highlight: '#c084fc',
-        hover: '#e0e0e8',
-      },
+      color: { color: valenceToColor(e.valence || 0), highlight: '#c084fc', hover: '#e0e0e8' },
       arrows: { to: { enabled: true, scaleFactor: 0.5 } },
-      smooth: { type: 'curvedCW', roundness: 0.2 },
-      hoverWidth: 1.5,
+      smooth: { type: 'curvedCW', roundness: 0.2 }, hoverWidth: 1.5,
     };
   }));
 
   const options = {
-    physics: {
-      barnesHut: {
-        gravitationalConstant: -1500,
-        springLength: 150,
-        springConstant: 0.04,
-        damping: 0.09,
-      },
-      stabilization: { iterations: 100, fit: true },
-    },
-    interaction: { hover: true, tooltipDelay: 200 },
-    layout: { improvedLayout: true },
+    physics: { barnesHut: { gravitationalConstant: -1500, springLength: 150, springConstant: 0.04, damping: 0.09 }, stabilization: { iterations: 100, fit: true } },
+    interaction: { hover: true, tooltipDelay: 200 }, layout: { improvedLayout: true },
   };
-
   return { nodes, edges, options };
 }
 
@@ -679,14 +852,18 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-/**
- * Highlight @mentions in message text with colored spans.
- * Input is already HTML-escaped.
- */
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function debounce(fn, ms) {
+  let timer;
+  return function (...args) { clearTimeout(timer); timer = setTimeout(() => fn.apply(this, args), ms); };
+}
+
 function highlightMentions(escapedText) {
   return escapedText.replace(/@(\S+)/g, (match, name) => {
     const lower = name.toLowerCase();
-    // Check if it's a known agent or "all"
     const agent = agents.find(a => a.name.toLowerCase() === lower || a.id.toLowerCase() === lower);
     if (agent) {
       const color = getAgentColor(agent.id);
@@ -699,9 +876,6 @@ function highlightMentions(escapedText) {
   });
 }
 
-/**
- * Insert @mention for a specific agent into the input.
- */
 function insertMention(agentName) {
   const value = messageInput.value;
   const suffix = value.length > 0 && !value.endsWith(' ') ? ' ' : '';
@@ -717,61 +891,28 @@ function scrollToBottom() {
   }
 }
 
-/**
- * Lightweight Markdown renderer for agent messages.
- * Input must already be HTML-escaped for XSS safety.
- */
 function renderMarkdown(escapedText) {
   let text = escapedText;
-
-  // Code blocks: ```...```
-  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, _lang, code) => {
-    return `<pre class="md-code-block"><code>${code.trim()}</code></pre>`;
-  });
-
-  // Inline code: `...`
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_m, _lang, code) => `<pre class="md-code-block"><code>${code.trim()}</code></pre>`);
   text = text.replace(/`([^`\n]+)`/g, '<code class="md-inline-code">$1</code>');
-
-  // Bold: **...**
   text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-
-  // Italic: *...*
   text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
-
-  // Unordered lists: lines starting with - or *
   text = text.replace(/^([*\-]) (.+)$/gm, '<li>$2</li>');
   text = text.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul class="md-list">$1</ul>');
-
-  // Ordered lists: lines starting with 1. 2. etc.
   text = text.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-  text = text.replace(/((?:<li>.*<\/li>\n?)+)/g, (match) => {
-    // Avoid double-wrapping already wrapped <ul>
-    if (match.startsWith('<ul')) return match;
-    return `<ol class="md-list">${match}</ol>`;
-  });
-
-  // Highlight @mentions
+  text = text.replace(/((?:<li>.*<\/li>\n?)+)/g, (match) => match.startsWith('<ul') ? match : `<ol class="md-list">${match}</ol>`);
   text = highlightMentions(text);
-
   return text;
 }
 
-/**
- * Update send button disabled state based on input content.
- */
 function updateSendButtonState() {
   const hasContent = messageInput.value.trim().length > 0;
   sendButton.classList.toggle('empty', !hasContent && !isProcessing);
 }
 
-/**
- * Toggle mobile sidebar.
- */
 function toggleSidebar() {
-  const sidebar = document.querySelector('.sidebar');
-  const overlay = document.querySelector('.sidebar-overlay');
-  sidebar.classList.toggle('open');
-  overlay.classList.toggle('open');
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.querySelector('.sidebar-overlay').classList.toggle('open');
 }
 
 // ─── Fullscreen Graph Modal ─────────────────────
@@ -782,11 +923,7 @@ function openGraphModal() {
   const modal = document.getElementById('graphModal');
   modal.classList.add('open');
   document.body.style.overflow = 'hidden';
-
-  // Render fullscreen graph
-  if (lastVizData) {
-    renderModalGraph(lastVizData);
-  }
+  if (lastVizData) renderModalGraph(lastVizData);
 }
 
 function closeGraphModal() {
@@ -794,72 +931,40 @@ function closeGraphModal() {
   modal.classList.remove('open');
   document.body.style.overflow = '';
   closeModalPanel();
-
-  if (modalNetwork) {
-    modalNetwork.destroy();
-    modalNetwork = null;
-  }
+  if (modalNetwork) { modalNetwork.destroy(); modalNetwork = null; }
 }
 
 function renderModalGraph(vizData) {
   const container = document.getElementById('graphModalCanvas');
   if (!container || typeof vis === 'undefined') return;
-
-  if (modalNetwork) {
-    modalNetwork.destroy();
-  }
-
+  if (modalNetwork) modalNetwork.destroy();
   const { nodes, edges, options } = createGraphConfig(vizData);
   modalNetwork = new vis.Network(container, { nodes, edges }, options);
-
-  // Edge click → open edit panel
   modalNetwork.on('selectEdge', (params) => {
     if (params.edges.length === 1) {
-      const edgeId = params.edges[0];
-      const edge = (vizData.edges || []).find(e => e.id === edgeId);
-      if (edge) {
-        showModalEdgePanel(edge);
-      }
+      const edge = (vizData.edges || []).find(e => e.id === params.edges[0]);
+      if (edge) showModalEdgePanel(edge);
     }
   });
-
-  // Click canvas background → close panel
-  modalNetwork.on('deselectEdge', () => {
-    closeModalPanel();
-  });
+  modalNetwork.on('deselectEdge', () => closeModalPanel());
 }
 
 function showModalEdgePanel(edge) {
   const panel = document.getElementById('graphModalPanel');
   panel.classList.add('open');
-
   const dims = edge.dimensions || [];
-  const dimRows = dims.map(d => {
-    const val = d.value.toFixed(1);
-    return `
-      <div class="edit-dim-row">
-        <label class="edit-dim-label">${escapeHtml(d.type)}</label>
-        <input type="range" class="edit-dim-slider" min="-1" max="1" step="0.1"
-               value="${d.value}" data-dim="${escapeHtml(d.type)}"
-               oninput="this.nextElementSibling.textContent = parseFloat(this.value).toFixed(1)">
-        <span class="edit-dim-value">${val}</span>
-      </div>
-    `;
-  }).join('');
+  const dimRows = dims.map(d => `
+    <div class="edit-dim-row">
+      <label class="edit-dim-label">${escapeHtml(d.type)}</label>
+      <input type="range" class="edit-dim-slider" min="-1" max="1" step="0.1" value="${d.value}" data-dim="${escapeHtml(d.type)}" oninput="this.nextElementSibling.textContent = parseFloat(this.value).toFixed(1)">
+      <span class="edit-dim-value">${d.value.toFixed(1)}</span>
+    </div>
+  `).join('');
 
   panel.innerHTML = `
-    <div class="edit-panel-header">
-      <h4>${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</h4>
-      <button class="edit-panel-close" onclick="closeModalPanel()">&times;</button>
-    </div>
-    <div class="edit-panel-body">
-      ${dims.length === 0 ? '<p class="edit-empty">暂无维度数据</p>' : dimRows}
-    </div>
-    ${dims.length > 0 ? `
-    <div class="edit-panel-footer">
-      <button class="edit-save-btn" onclick="saveModalEdge('${escapeHtml(edge.from)}', '${escapeHtml(edge.to)}')">保存</button>
-      <button class="edit-cancel-btn" onclick="closeModalPanel()">取消</button>
-    </div>` : ''}
+    <div class="edit-panel-header"><h4>${escapeHtml(edge.from)} → ${escapeHtml(edge.to)}</h4><button class="edit-panel-close" onclick="closeModalPanel()">&times;</button></div>
+    <div class="edit-panel-body">${dims.length === 0 ? '<p class="edit-empty">No dimension data</p>' : dimRows}</div>
+    ${dims.length > 0 ? `<div class="edit-panel-footer"><button class="edit-save-btn" onclick="saveModalEdge('${escapeHtml(edge.from)}', '${escapeHtml(edge.to)}')">Save</button><button class="edit-cancel-btn" onclick="closeModalPanel()">Cancel</button></div>` : ''}
   `;
 }
 
@@ -874,69 +979,40 @@ async function saveModalEdge(from, to) {
   const sliders = panel.querySelectorAll('.edit-dim-slider');
   const saveBtn = panel.querySelector('.edit-save-btn');
   if (saveBtn) saveBtn.disabled = true;
-
   for (const slider of sliders) {
-    const dimension = slider.dataset.dim;
-    const value = parseFloat(slider.value);
-    await updateRelationDimension(from, to, dimension, value);
+    await updateRelationDimension(from, to, slider.dataset.dim, parseFloat(slider.value));
   }
-
   closeModalPanel();
 }
 
-// ESC key closes modal
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.getElementById('graphModal').classList.contains('open')) {
-    closeGraphModal();
-  }
-});
-
-// ─── Inline Relation Editing (List View) ────────
+// ─── Inline Relation Editing ────────────────────
 
 function renderRelationships(vizData) {
   const relations = vizData.edges || [];
   if (!relations || relations.length === 0) {
-    relationshipList.innerHTML = '<div class="empty-state">开始对话后，Agent 之间的关系将在这里展示</div>';
+    relationshipList.innerHTML = '<div class="empty-state">Start a conversation to see agent relationships here</div>';
     return;
   }
-
   relationshipList.innerHTML = '';
-
   for (const edge of relations) {
     if (!edge.dimensions || edge.dimensions.length === 0) continue;
-
     const div = document.createElement('div');
     div.className = 'relationship-item';
-
     const fromColor = getAgentColor(edge.from);
     const toColor = getAgentColor(edge.to);
-
-    const dims = edge.dimensions
-      .filter(d => Math.abs(d.value) > 0.1)
-      .map(d => {
-        const cls = d.value >= 0 ? 'positive' : 'negative';
-        const sign = d.value >= 0 ? '+' : '';
-        const pct = Math.min(Math.abs(d.value) * 100, 100);
-        return `
-          <div class="rel-dim-row">
-            <span class="rel-dim ${cls}">${d.type} ${sign}${d.value.toFixed(1)}</span>
-            <div class="rel-strength-bar">
-              <div class="rel-strength-fill ${cls}" style="width: ${pct}%"></div>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
-
-    const edgeFrom = escapeHtml(edge.from);
-    const edgeTo = escapeHtml(edge.to);
+    const dims = edge.dimensions.filter(d => Math.abs(d.value) > 0.1).map(d => {
+      const cls = d.value >= 0 ? 'positive' : 'negative';
+      const sign = d.value >= 0 ? '+' : '';
+      const pct = Math.min(Math.abs(d.value) * 100, 100);
+      return `<div class="rel-dim-row"><span class="rel-dim ${cls}">${d.type} ${sign}${d.value.toFixed(1)}</span><div class="rel-strength-bar"><div class="rel-strength-fill ${cls}" style="width: ${pct}%"></div></div></div>`;
+    }).join('');
 
     div.innerHTML = `
       <div class="rel-agents">
-        <span style="color: ${fromColor}">${edgeFrom}</span>
+        <span style="color: ${fromColor}">${escapeHtml(edge.from)}</span>
         <span class="rel-arrow">→</span>
-        <span style="color: ${toColor}">${edgeTo}</span>
-        <button class="rel-edit-btn" onclick="toggleInlineEdit(this, '${edgeFrom}', '${edgeTo}')" title="编辑">&#9998;</button>
+        <span style="color: ${toColor}">${escapeHtml(edge.to)}</span>
+        <button class="rel-edit-btn" onclick="toggleInlineEdit(this, '${escapeHtml(edge.from)}', '${escapeHtml(edge.to)}')" title="Edit">&#9998;</button>
       </div>
       ${dims}
       <div class="rel-inline-edit" style="display:none;"></div>
@@ -948,34 +1024,11 @@ function renderRelationships(vizData) {
 function toggleInlineEdit(btn, from, to) {
   const item = btn.closest('.relationship-item');
   const editDiv = item.querySelector('.rel-inline-edit');
-
-  if (editDiv.style.display !== 'none') {
-    editDiv.style.display = 'none';
-    editDiv.innerHTML = '';
-    return;
-  }
-
-  // Find the edge data
+  if (editDiv.style.display !== 'none') { editDiv.style.display = 'none'; editDiv.innerHTML = ''; return; }
   const edge = (lastVizData?.edges || []).find(e => e.from === from && e.to === to);
   if (!edge || !edge.dimensions) return;
-
-  const dimRows = edge.dimensions.map(d => `
-    <div class="edit-dim-row">
-      <label class="edit-dim-label">${escapeHtml(d.type)}</label>
-      <input type="range" class="edit-dim-slider" min="-1" max="1" step="0.1"
-             value="${d.value}" data-dim="${escapeHtml(d.type)}"
-             oninput="this.nextElementSibling.textContent = parseFloat(this.value).toFixed(1)">
-      <span class="edit-dim-value">${d.value.toFixed(1)}</span>
-    </div>
-  `).join('');
-
-  editDiv.innerHTML = `
-    ${dimRows}
-    <div class="edit-inline-actions">
-      <button class="edit-save-btn" onclick="saveInlineEdit(this, '${escapeHtml(from)}', '${escapeHtml(to)}')">保存</button>
-      <button class="edit-cancel-btn" onclick="this.closest('.rel-inline-edit').style.display='none'">取消</button>
-    </div>
-  `;
+  const dimRows = edge.dimensions.map(d => `<div class="edit-dim-row"><label class="edit-dim-label">${escapeHtml(d.type)}</label><input type="range" class="edit-dim-slider" min="-1" max="1" step="0.1" value="${d.value}" data-dim="${escapeHtml(d.type)}" oninput="this.nextElementSibling.textContent = parseFloat(this.value).toFixed(1)"><span class="edit-dim-value">${d.value.toFixed(1)}</span></div>`).join('');
+  editDiv.innerHTML = `${dimRows}<div class="edit-inline-actions"><button class="edit-save-btn" onclick="saveInlineEdit(this, '${escapeHtml(from)}', '${escapeHtml(to)}')">Save</button><button class="edit-cancel-btn" onclick="this.closest('.rel-inline-edit').style.display='none'">Cancel</button></div>`;
   editDiv.style.display = 'block';
 }
 
@@ -983,18 +1036,12 @@ async function saveInlineEdit(btn, from, to) {
   const editDiv = btn.closest('.rel-inline-edit');
   const sliders = editDiv.querySelectorAll('.edit-dim-slider');
   btn.disabled = true;
-
   for (const slider of sliders) {
-    const dimension = slider.dataset.dim;
-    const value = parseFloat(slider.value);
-    await updateRelationDimension(from, to, dimension, value);
+    await updateRelationDimension(from, to, slider.dataset.dim, parseFloat(slider.value));
   }
-
   editDiv.style.display = 'none';
   editDiv.innerHTML = '';
 }
-
-// ─── Relation Update API ────────────────────────
 
 async function updateRelationDimension(from, to, dimension, value) {
   await fetch('/api/relations', {
